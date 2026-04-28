@@ -249,6 +249,25 @@ class MemoryManager:
             logger.error("search_facts error: %s", e)
             return []
 
+    def search_corpus(self, query: str, n_results: int = 5) -> dict:
+        """
+        Semantic search over the propaganda corpus.
+        Returns the raw ChromaDB results (including distances).
+        """
+        try:
+            col = self._chroma.get_collection(CHROMA_CORPUS_COLLECTION)
+            if col.count() == 0:
+                return {}
+            emb = self._embed([query])[0]
+            return col.query(
+                query_embeddings=[emb],
+                n_results=min(n_results, col.count()),
+                include=["documents", "distances", "metadatas"],
+            )
+        except Exception as e:
+            logger.error("search_corpus error: %s", e)
+            return {}
+
     def rebuild_chroma_index(self) -> int:
         """Rebuild ChromaDB from memory.json. Returns count of indexed facts."""
         try:

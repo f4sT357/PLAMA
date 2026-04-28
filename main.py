@@ -58,10 +58,11 @@ app.add_middleware(
 memory_manager.init()
 config_manager = ConfigManager(MEMORY_DIR)
 
-# Inject config manager into components
+# Inject dependencies into components
 model_router.config_manager = config_manager
 bias_checker.config_manager = config_manager
 bias_checker.model_router = model_router
+bias_checker._mm = memory_manager
 
 trust_registry = TrustRegistry(memory_manager)
 

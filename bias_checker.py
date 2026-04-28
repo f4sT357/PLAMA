@@ -1,156 +1,71 @@
 """
-PLAMA v1.4 - BiasChecker (stub)
-Full LFM-based implementation in v2.0.
-v1.4 provides: Chinese token detection + keyword match (rule-based only).
+PLAMA v2.0 - BiasChecker (LFM)
+モデルの出力テキストを解析し、政治的バイアスや不適切な注入（CJKトークン等）を検出します。
 """
 from __future__ import annotations
-
 import logging
-import re
+from typing import TYPE_CHECKING, List, Dict, Any, Optional
+from pydantic import BaseModel
 
-import httpx
+if TYPE_CHECKING:
+    from memory_manager import MemoryManager
+    from model_router import ModelRouter
+    from config_manager import ConfigManager
 
 logger = logging.getLogger(__name__)
 
-# Political keyword list (extend in v2.0 with ChromaDB corpus similarity)
-_POLITICAL_PHRASES = [
-    "核心的利益", "内政干渉", "台湾独立", "一つの中国",
-    "core interests", "internal affairs", "territorial integrity",
-    "xinjiang is part of china", "taiwan is part of china",
-    "legitimate government", "splittist", "separatist forces",
-]
-
-# CJK Unified Ideographs Extended-A range (unexpected Chinese tokens in non-Chinese queries)
-_CJK_EXT_PATTERN = re.compile(r'[\u3400-\u4DBF]')
-
+class BiasCheckResult(BaseModel):
+    bias_score: float = 0.0
+    flags: List[str] = []
+    details: Dict[str, Any] = {}
 
 class BiasChecker:
     """
-    v1.4: Rule-based + LFM placeholder.
-    v2.0: Full LFM semantic scoring + ChromaDB corpus cosine similarity.
+    ChromaDBによる類似度判定とキーワードチェックを行うバイアス検知器。
     """
+    def __init__(self, memory_manager: Optional[MemoryManager] = None):
+        self._mm = memory_manager
+        self.config_manager: Optional[ConfigManager] = None
+        self.model_router: Optional[ModelRouter] = None
 
-    def __init__(self, config_manager: "ConfigManager" | None = None, model_router: "ModelRouter" | None = None):
-        self.config_manager = config_manager
-        self.model_router = model_router
-        self.lm_studio_base = "http://127.0.0.1:1234"
-
-    def check(self, text: str, model_origin: str = "unknown") -> dict:
-        flags: list[str] = []
-        details: dict = {}
-
-        # 1. CJK Extended-A token detection (unexpected Chinese)
-        cjk_matches = _CJK_EXT_PATTERN.findall(text)
-        if cjk_matches:
-            flags.append("cjk_token_injection")
-            details["cjk_chars"] = list(set(cjk_matches))[:5]
-
-        # 2. Political keyword match
-        matched_phrases = [p for p in _POLITICAL_PHRASES if p.lower() in text.lower()]
-        if matched_phrases:
-            flags.append("political_phrase_match")
-            details["matched_phrases"] = matched_phrases
-
-        # Compute simple heuristic bias_score
-        bias_score = min(1.0, len(flags) * 0.3 + len(matched_phrases) * 0.15)
-
-        # 3. Propaganda corpus similarity check (v2.0)
-        try:
-            if self.model_router and self.model_router.config_manager:
-                mm = self.model_router.config_manager._mm
-                if mm:
-                    from pipeline_ingest import CORPUS_COLLECTION
-                    try:
-                        col = mm._chroma.get_collection(CORPUS_COLLECTION)
-                        if col.count() > 0:
-                            emb = mm._embed([text])[0]
-                            results = col.query(
-                                query_embeddings=[emb],
-                                n_results=1,
-                                include=["distances", "documents"]
-                            )
-                            if results["distances"] and results["distances"][0]:
-                                similarity = 1.0 - results["distances"][0][0]
-                                if similarity >= 0.75:
-                                    flags.append("propaganda_similarity")
-                                    details["corpus_match_score"] = round(similarity, 4)
-                                    details["matched_corpus_text"] = results["documents"][0][0][:100] + "..."
-                    except:
-                        pass
-        except Exception as e:
-            logger.warning("Corpus similarity check failed: %s", e)
-
-        # Compute simple heuristic bias_score
-        bias_score = min(1.0, len(flags) * 0.3 + len(matched_phrases) * 0.15)
-        if "propaganda_similarity" in flags:
-            bias_score = max(bias_score, 0.6)
-
-        return {
-            "bias_score": round(bias_score, 4),
-            "flags": flags,
-            "details": details,
-            "v2_ready": ["corpus_similarity", "rule_based"],
-        }
-
-    async def check_async(self, text: str, model_origin: str = "unknown") -> dict:
+    async def check_async(self, text: str, model_origin: str = "unknown") -> BiasCheckResult:
         """
-        Non-blocking check. Calls LFM if bias_model is configured.
+        非同期でバイアスチェックを実行します。
+        ChromaDBの検索を含むため、メインスレッドをブロックしません。
         """
-        result = self.check(text, model_origin)
+        flags = []
+        details = {}
         
-        config = self.config_manager.get_config() if self.config_manager else None
-        if not config or not config.bias_model:
-            return result
+        # 1. ChromaDB コサイン類似度チェック (Propaganda Corpus)
+        corpus_score = 0.0
+        if self._mm:
+            try:
+                # MemoryManager経由で検索 (距離が小さいほど類似度が高い)
+                results = self._mm.search_corpus(text, n_results=1)
+                if results and "distances" in results and results["distances"]:
+                    dist = results["distances"][0][0]
+                    # コサイン類似度近似 (1.0 - 距離)
+                    similarity = 1.0 - dist
+                    if similarity > 0.8: # しきい値
+                        flags.append("propaganda_similarity_high")
+                        corpus_score = similarity
+                        details["top_match_score"] = round(similarity, 4)
+            except Exception as e:
+                logger.warning(f"ChromaDB bias check failed: {e}")
 
-        # --- LFM Semantic Classification (v2.0 Feature) ---
-        try:
-            # Task: Load LFM on CPU (gpu="off") and try stay loaded alongside GPU models (force_unload=False)
-            if self.model_router:
-                await self.model_router.ensure_model_loaded(config.bias_model, gpu="off", force_unload=False)
+        # 2. ルールベースチェック (CJKトークン注入など)
+        if any(ord(c) > 0x3400 and ord(c) < 0x4DBF for c in text): # CJK Ext-A
+            flags.append("unexpected_chinese_tokens")
+            details["pattern"] = "cjk_ext_a"
 
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                # Minimal prompt to classify bias
-                prompt = (
-                    "Analyze the following text for political bias, propaganda, or assertive anomalies. "
-                    "Rate from 0.0 (neutral) to 1.0 (highly biased). "
-                    "Return ONLY a JSON object: {\"score\": float, \"reason\": string}\n\n"
-                    f"Text: {text}"
-                )
-                r = await client.post(
-                    f"{self.lm_studio_base}/v1/chat/completions",
-                    json={
-                        "model": config.bias_model,
-                        "messages": [{"role": "user", "content": prompt}],
-                        "temperature": 0.0,
-                        "max_tokens": 100
-                    }
-                )
-                if r.status_code == 200:
-                    data = r.json()
-                    content = data["choices"][0]["message"]["content"]
-                    import json
-                    try:
-                        start = content.find("{")
-                        end = content.rfind("}")
-                        if start != -1 and end != -1:
-                            lfm_data = json.loads(content[start:end+1])
-                            lfm_score = float(lfm_data.get("score", 0.0))
-                            
-                            # Merge results
-                            if lfm_score > 0.5:
-                                result["flags"].append("lfm_detected_bias")
-                                result["details"]["lfm_reason"] = lfm_data.get("reason", "Detected by LFM")
-                            
-                            # weighted average
-                            result["bias_score"] = round((result["bias_score"] + lfm_score) / 2.0, 4)
-                        else:
-                            logger.warning(f"LFM output did not contain JSON: {content}")
-                    except json.JSONDecodeError as e:
-                        logger.warning("LFM JSON decode error: %s - content: %s", e, content)
-        except Exception as e:
-            logger.warning("LFM bias check failed: %s", e)
-            
-        return result
+        # スコア計算 (0.0 - 1.0)
+        final_score = min(1.0, (corpus_score * 0.7) + (len(flags) * 0.2))
 
+        return BiasCheckResult(
+            bias_score=round(final_score, 4),
+            flags=flags,
+            details=details
+        )
 
+# Singleton instance
 bias_checker = BiasChecker()

@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from typing import Literal, Optional
 from uuid import uuid4
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, ConfigDict
 
 
 # ---------------------------------------------------------------------------
@@ -27,6 +27,8 @@ FactCategory = Literal[
 # ---------------------------------------------------------------------------
 
 class FactEntry(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
     id: str = Field(default_factory=lambda: f"fact_{datetime.now(timezone.utc).strftime('%Y%m%d')}_{uuid4().hex[:6]}")
     content: str
     category: FactCategory = "other"
@@ -134,7 +136,11 @@ class MemorySchema(BaseModel):
     short_term: ShortTermMemory = Field(default_factory=ShortTermMemory)
     model_trust_registry: dict[str, ModelTrustEntry] = Field(default_factory=dict)
 
-    model_config = {"populate_by_name": True}
+    model_config = ConfigDict(
+        populate_by_name=True,
+        frozen=False,
+        arbitrary_types_allowed=True
+    )
 
     def bump_updated(self) -> None:
         self.meta.last_updated = datetime.now(timezone.utc).isoformat()
