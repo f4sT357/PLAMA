@@ -1,6 +1,6 @@
 "use client";
 import { useCallback, useEffect, useRef, useState, KeyboardEvent } from "react";
-import { chatStream, fetchAvailableModels, ChatMeta } from "@/lib/api";
+import { chatStream, fetchAvailableModels, ChatMeta, consolidateSession } from "@/lib/api";
 import { useApp } from "@/lib/AppContext";
 
 interface Message {
@@ -65,6 +65,22 @@ export default function ChatPage() {
         <div style={{ flex: 1 }} />
         
         <div className="flex items-center gap-3">
+          <button
+            className="btn btn-secondary btn-sm"
+            onClick={async () => {
+              if (!sessionId) return;
+              try {
+                toast("記憶を定着させています...", "info");
+                await consolidateSession(sessionId);
+                toast("記憶の定着が完了しました", "success");
+              } catch (e) {
+                toast("記憶の定着に失敗しました", "error");
+              }
+            }}
+            disabled={messages.length === 0}
+          >
+            🧠 Consolidate
+          </button>
           <div className="select-wrapper" style={{ width: 220 }}>
             <select
               id="model-override-select"

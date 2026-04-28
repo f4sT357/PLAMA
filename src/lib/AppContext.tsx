@@ -2,7 +2,7 @@
 import React, {
   createContext, useCallback, useContext, useEffect, useRef, useState,
 } from "react";
-import { fetchHealth, newSession, HealthResponse, chatStream, ChatMeta } from "@/lib/api";
+import { fetchHealth, newSession, HealthResponse, chatStream, ChatMeta, consolidateSession } from "@/lib/api";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -68,14 +68,31 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
 
   const startNewSession = useCallback(async () => {
     try {
+      // 1. もし現在のセッションにメッセージがあるなら、バックグラウンドで集約処理を実行
+      if (sessionId && messages.length > 0) {
+        toast("記憶を定着させています...", "info");
+        // 注意: ユーザーを待たせないよう await しないか、あるいは確実に実行されるようにします
+        consolidateSession(sessionId)
+          .then(res => {
+            console.log("Consolidation complete:", res);
+            toast("会話から新しいファクトを記憶しました", "success");
+            refreshHealth();
+          })
+          .catch(err => {
+            console.error("Consolidation failed:", err);
+            toast("記憶の定着に失敗しました", "error");
+          });
+      }
+
+      // 2. 新しいセッションを開始
       const { session_id } = await newSession();
       setSessionId(session_id);
-      setMessages([]); // Clear on new session
+      setMessages([]); // Clear global messages for the new session
       toast("新しいセッションを開始しました", "success");
     } catch {
       toast("セッション作成に失敗しました", "error");
     }
-  }, [toast]);
+  }, [toast, sessionId, messages.length, refreshHealth]);
 
   // --- Global Chat Logic ---
   
