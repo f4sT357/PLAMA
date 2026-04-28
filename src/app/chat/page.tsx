@@ -15,19 +15,19 @@ interface Message {
 let msgId = 0;
 
 export default function ChatPage() {
-  const { sessionId, health, messages, isStreaming, sendMessage, stopStreaming, toast } = useApp();
+  const { sessionId, health, messages, isStreaming, sendMessage, stopStreaming, toast, models } = useApp();
   const [input, setInput] = useState("");
   const [overrideModel, setOverrideModel] = useState("");
   const [modelOptions, setModelOptions] = useState<string[]>([]);
   const bottomRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
-  // LM Studioから動的にモデルリストを取得
+  // Sync model options from global cache
   useEffect(() => {
-    fetchAvailableModels()
-      .then(({ models }) => setModelOptions(models.map(m => m.id)))
-      .catch(() => setModelOptions([]));
-  }, []);
+    if (models.length > 0) {
+      setModelOptions(models.map(m => m.id));
+    }
+  }, [models]);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });

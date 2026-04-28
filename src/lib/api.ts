@@ -155,8 +155,20 @@ export async function* chatStream(
 }
 
 export async function consolidateSession(sessionId: string): Promise<unknown> {
-  const r = await fetch(`${API_BASE}/api/session/${sessionId}/consolidate`, { method: "POST" });
-  if (!r.ok) throw new Error("Consolidation failed");
+  const url = `${API_BASE}/api/session/${sessionId}/consolidate`;
+  console.log(`[API] Consolidation request for session: ${sessionId} | URL: ${url}`);
+  
+  if (!sessionId) {
+    console.error("[API] sessionId is missing!");
+    throw new Error("Session ID is required for consolidation");
+  }
+
+  const r = await fetch(url, { method: "POST" });
+  if (!r.ok) {
+    const errorText = await r.text();
+    console.error(`[API] Consolidation failed with status ${r.status}: ${errorText}`);
+    throw new Error(`Consolidation failed: ${r.status}`);
+  }
   return r.json();
 }
 

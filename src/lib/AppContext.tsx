@@ -2,7 +2,10 @@
 import React, {
   createContext, useCallback, useContext, useEffect, useRef, useState,
 } from "react";
-import { fetchHealth, newSession, HealthResponse, chatStream, ChatMeta, consolidateSession } from "@/lib/api";
+import { 
+  fetchHealth, newSession, HealthResponse, chatStream, ChatMeta, consolidateSession,
+  fetchAvailableModels, fetchTrust, fetchConfig, LMStudioModel, TrustEntry, PlamaConfig
+} from "@/lib/api";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -25,6 +28,15 @@ interface AppCtx {
   toast: (msg: string, type?: ToastType) => void;
   startNewSession: () => Promise<void>;
   refreshHealth: () => Promise<void>;
+  
+  // Cached Global Data
+  models: LMStudioModel[];
+  config: PlamaConfig | null;
+  trust: Record<string, TrustEntry>;
+  loadModels: () => Promise<void>;
+  loadConfig: () => Promise<void>;
+  loadTrust: () => Promise<void>;
+
   // Global Chat State
   messages: Message[];
   isStreaming: boolean;
@@ -44,6 +56,11 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const [health, setHealth] = useState<HealthResponse | null>(null);
   const [toasts, setToasts] = useState<Toast[]>([]);
   
+  // Cached Global Data
+  const [models, setModels] = useState<LMStudioModel[]>([]);
+  const [config, setConfig] = useState<PlamaConfig | null>(null);
+  const [trust, setTrust] = useState<Record<string, TrustEntry>>({});
+
   // Global Chat State
   const [messages, setMessages] = useState<Message[]>([]);
   const [isStreaming, setIsStreaming] = useState(false);
@@ -53,6 +70,29 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     const id = ++toastId;
     setToasts(p => [...p, { id, msg, type }]);
     setTimeout(() => setToasts(p => p.filter(t => t.id !== id)), 3500);
+  }, []);
+
+  /* ─── Data Loaders ─────────────────────────────────────────────── */
+
+  const loadModels = useCallback(async () => {
+    try {
+      const data = await fetchAvailableModels();
+      setModels(data.models);
+    } catch { /* skip */ }
+  }, []);
+
+  const loadConfig = useCallback(async () => {
+    try {
+      const c = await fetchConfig();
+      setConfig(c);
+    } catch { /* skip */ }
+  }, []);
+
+  const loadTrust = useCallback(async () => {
+    try {
+      const { trust_registry } = await fetchTrust();
+      setTrust(trust_registry);
+    } catch { /* skip */ }
   }, []);
 
   const refreshHealth = useCallback(async () => {
@@ -66,19 +106,19 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
 
   const startNewSession = useCallback(async () => {
     try {
-      // 1. もし現在のセッションにメッセージがあるなら、バックグラウンドで集約処理を実行
-      // 依存関係を減らすため、現在の状態を最新の状態で取得
+      // 1. もし現在のセッションにメッセージがあるなら、集約処理を完了まで待機
       if (sessionId && messages.length > 0) {
         toast("記憶を定着させています...", "info");
-        consolidateSession(sessionId)
-          .then(() => {
-            toast("会話から新しいファクトを記憶しました", "success");
-            refreshHealth();
-          })
-          .catch(err => {
-            console.error("Consolidation failed:", err);
-            toast("記憶の定着に失敗しました", "error");
-          });
+        try {
+          await consolidateSession(sessionId);
+          toast("会話から新しいファクトを記憶しました", "success");
+          await refreshHealth();
+        } catch (err) {
+          console.error("Consolidation failed:", err);
+          toast("記憶の定着に失敗しました", "error");
+          // 失敗してもセッション更新は進めるか、ここで止めるか選択可能
+          // 今回は確実に新しい会話を始められるよう継続します
+        }
       }
 
       // 2. 新しいセッションを開始
@@ -89,8 +129,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     } catch {
       toast("セッション作成に失敗しました", "error");
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sessionId, messages.length]); // 依然として依存していますが、useEffectからは外します
+  }, [sessionId, messages.length, toast, refreshHealth]);
 
   // 初回起動時の初期化
   useEffect(() => {
@@ -101,6 +140,11 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       setSessionId(session_id);
     };
     init();
+    
+    // Initial data load (Only once)
+    loadModels();
+    loadConfig();
+    loadTrust();
 
     const timer = setInterval(refreshHealth, 15_000);
     return () => clearInterval(timer);
@@ -166,6 +210,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   return (
     <Ctx.Provider value={{ 
       sessionId, health, toasts, toast, startNewSession, refreshHealth,
+      models, config, trust, loadModels, loadConfig, loadTrust,
       messages, isStreaming, sendMessage, stopStreaming, clearMessages
     }}>
       {children}

@@ -8,68 +8,32 @@ import {
 import { useApp } from "@/lib/AppContext";
 
 export default function ModelsPage() {
-  const { toast, health, refreshHealth } = useApp();
-  const [models, setModels] = useState<LMStudioModel[]>([]);
-  const [trust, setTrust] = useState<Record<string, TrustEntry>>({});
-  const [loadingModels, setLoadingModels] = useState(true);
-  const [loadingTrust, setLoadingTrust] = useState(true);
-  const [reachable, setReachable] = useState(false);
+  const { toast, health, refreshHealth, models, trust, config, loadModels, loadTrust, loadConfig } = useApp();
+  const [loadingModels, setLoadingModels] = useState(false);
+  const [loadingTrust, setLoadingTrust] = useState(false);
+  const [reachable, setReachable] = useState(true);
   const [actionModel, setActionModel] = useState<string | null>(null);
-  const [currentConfig, setCurrentConfig] = useState<PlamaConfig | null>(null);
   const [savingConfig, setSavingConfig] = useState(false);
+  const [hasInitializedConfig, setHasInitializedConfig] = useState(false);
   const [editedConfig, setEditedConfig] = useState<{
     main_model: string;
     sub_model: string;
     bias_model: string;
-  }>({ main_model: "", sub_model: "", bias_model: "" });
+    consolidation_model: string;
+  }>({ main_model: "", sub_model: "", bias_model: "", consolidation_model: "" });
 
-  /* ─── Fetch all LM Studio models ─────────────────────────────────── */
-  const loadModels = useCallback(async () => {
-    setLoadingModels(true);
-    try {
-      const data = await fetchAvailableModels();
-      setModels(data.models);
-      setReachable(data.lm_studio_reachable);
-    } catch {
-      setReachable(false);
-    } finally {
-      setLoadingModels(false);
-    }
-  }, []);
-
-  /* ─── Fetch trust registry ────────────────────────────────────────── */
-  const loadTrust = useCallback(async () => {
-    setLoadingTrust(true);
-    try {
-      const { trust_registry } = await fetchTrust();
-      setTrust(trust_registry);
-    } catch {
-      // ok
-    } finally {
-      setLoadingTrust(false);
-    }
-  }, []);
-
-  /* ─── Fetch config ────────────────────────────────────────────────── */
-  const loadConfig = useCallback(async () => {
-    try {
-      const config = await fetchConfig();
-      setCurrentConfig(config);
-      setEditedConfig({
-        main_model: config.main_model,
-        sub_model: config.sub_model,
-        bias_model: config.bias_model,
-      });
-    } catch (e) {
-      console.error("Config load failed", e);
-    }
-  }, []);
-
+  // Sync local editor state when global config is updated (Initial sync only)
   useEffect(() => {
-    loadModels();
-    loadTrust();
-    loadConfig();
-  }, [loadModels, loadTrust, loadConfig]);
+    if (config && !hasInitializedConfig) {
+      setEditedConfig({
+        main_model: config.main_model || "",
+        sub_model: config.sub_model || "",
+        bias_model: config.bias_model || "",
+        consolidation_model: config.consolidation_model || "",
+      });
+      setHasInitializedConfig(true);
+    }
+  }, [config, hasInitializedConfig]);
 
   /* ─── Load / Unload actions ───────────────────────────────────────── */
   const handleLoad = async (id: string) => {
@@ -102,10 +66,22 @@ export default function ModelsPage() {
   const handleRefresh = () => { loadModels(); loadTrust(); loadConfig(); refreshHealth(); };
 
   const handleSaveConfig = async () => {
+    if (!hasInitializedConfig) {
+      toast("設定を読み込み中です。しばらくお待ちください", "info");
+      return;
+    }
+    
+    // 全て空の場合は、初期ロード失敗の可能性が高いため保存を阻止
+    if (!editedConfig.main_model && !editedConfig.consolidation_model) {
+      toast("設定値が空です。モデルを選択してください", "warning");
+      return;
+    }
+
     setSavingConfig(true);
     try {
       await updateConfig(editedConfig);
       toast("設定を保存しました", "success");
+      // AppContext側の状態を最新にする
       await loadConfig();
     } catch {
       toast("設定の保存に失敗しました", "error");
@@ -159,7 +135,31 @@ export default function ModelsPage() {
       )}
 
       {/* Model Role Settings (v2.0 NEW) */}
-      <div className="panel" style={{ marginBottom: 28, border: "1px solid rgba(139,92,246,0.3)" }}>
+      <div className="panel" style={{ 
+        marginBottom: 28, 
+        border: "1px solid rgba(139,92,246,0.3)",
+        position: "relative",
+        overflow: "hidden"
+      }}>
+        {/* Loading Overlay */}
+        {!hasInitializedConfig && (
+          <div style={{
+            position: "absolute",
+            inset: 0,
+            background: "rgba(10,10,15,0.7)",
+            backdropFilter: "blur(4px)",
+            zIndex: 10,
+            display: "flex",
+            flexDirection: "column",
+            alignItems: "center",
+            justifyContent: "center",
+            gap: 12
+          }}>
+            <span className="spinner" style={{ width: 32, height: 32 }} />
+            <p className="text-sm font-medium">設定を読み込み中…</p>
+          </div>
+        )}
+
         <div className="panel-header" style={{ background: "rgba(139,92,246,0.05)" }}>
           <div className="flex items-center gap-2">
             <span style={{ fontSize: "1.1rem" }}>⚙️</span>
@@ -218,13 +218,30 @@ export default function ModelsPage() {
                 ))}
               </select>
             </div>
+
+            {/* Consolidation Model (Memory Keeper) */}
+            <div>
+              <label className="text-xs font-semibold text-muted" style={{ display: "block", marginBottom: 6 }}>
+                記憶集約モデル (Memory Keeper / Consolidation)
+              </label>
+              <select
+                className="select-styled"
+                value={editedConfig.consolidation_model}
+                onChange={(e) => setEditedConfig({ ...editedConfig, consolidation_model: e.target.value })}
+              >
+                <option value="">未設定 (Qwen3.5-9b)</option>
+                {models.map(m => (
+                  <option key={m.id} value={m.id}>{m.id.split("/").pop()}</option>
+                ))}
+              </select>
+            </div>
           </div>
 
           <div style={{ marginTop: 20, paddingTop: 16, borderTop: "1px solid var(--border-subtle)", display: "flex", justifyContent: "flex-end" }}>
             <button
               className="btn btn-primary"
               onClick={handleSaveConfig}
-              disabled={savingConfig}
+              disabled={savingConfig || !hasInitializedConfig}
             >
               {savingConfig ? <span className="spinner" /> : "設定を保存"}
             </button>
