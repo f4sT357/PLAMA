@@ -54,17 +54,42 @@ class BiasChecker:
         # Compute simple heuristic bias_score
         bias_score = min(1.0, len(flags) * 0.3 + len(matched_phrases) * 0.15)
 
-        # v2.0 TODO:
-        # - Query ChromaDB corpus collection for cosine similarity (threshold 0.75)
-        # - Call LFM for semantic classification
-        # - Add "propaganda_similarity" flag
-        # - Add "assertion_anomaly" flag (confidence distribution outlier)
+        # 3. Propaganda corpus similarity check (v2.0)
+        try:
+            if self.model_router and self.model_router.config_manager:
+                mm = self.model_router.config_manager._mm
+                if mm:
+                    from pipeline_ingest import CORPUS_COLLECTION
+                    try:
+                        col = mm._chroma.get_collection(CORPUS_COLLECTION)
+                        if col.count() > 0:
+                            emb = mm._embed([text])[0]
+                            results = col.query(
+                                query_embeddings=[emb],
+                                n_results=1,
+                                include=["distances", "documents"]
+                            )
+                            if results["distances"] and results["distances"][0]:
+                                similarity = 1.0 - results["distances"][0][0]
+                                if similarity >= 0.75:
+                                    flags.append("propaganda_similarity")
+                                    details["corpus_match_score"] = round(similarity, 4)
+                                    details["matched_corpus_text"] = results["documents"][0][0][:100] + "..."
+                    except:
+                        pass
+        except Exception as e:
+            logger.warning("Corpus similarity check failed: %s", e)
+
+        # Compute simple heuristic bias_score
+        bias_score = min(1.0, len(flags) * 0.3 + len(matched_phrases) * 0.15)
+        if "propaganda_similarity" in flags:
+            bias_score = max(bias_score, 0.6)
 
         return {
             "bias_score": round(bias_score, 4),
             "flags": flags,
             "details": details,
-            "v2_pending": ["corpus_similarity", "lfm_classification"],
+            "v2_ready": ["corpus_similarity", "rule_based"],
         }
 
     async def check_async(self, text: str, model_origin: str = "unknown") -> dict:

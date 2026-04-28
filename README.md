@@ -1,58 +1,34 @@
-# 🧠 PLAMA 2.0 (Personal Local AI Memory Assistant)
+# 🧠 PLAMA 2.0 (Persistent Local AI Memory Adapter)
 
-> **「忘れない、偏らない、あなただけのAI」**
+> **"AI Middleware Layer — Trust-Aware Multi-Model Orchestration"**
 
-PLAMA 2.0 は、ローカル LLM (LM Studio) をエンジンとして活用し、ユーザーとの会話から永続的な「記憶（事実）」を構築・活用する次世代のパーソナルアシスタントです。
+PLAMA 2.0 は、単なるチャットアシスタントを超え、信頼性の異なる複数の AI コンポーネントを調停し、記憶と信頼性を一元管理する **AI ミドルウェアレイヤー** です。
 
-## 🌟 主な特徴
+## 🛠️ v2.0 の設計転換 (Adapter Edition)
 
-### 1. 鉄壁の記憶集約 (Robust Memory Consolidation)
-会話の節目に、LLM が内容を分析して重要な事実を抽出します。
-- **耐障害パース**: 軽量・高速なモデル（LFM等）が生成する不安定な JSON フォーマットを、独自のアルゴリズムでリアルタイム修復。
-- **重複排除 (Dedup)**: ChromaDB によるベクトル検索を用い、既に知っている情報は重複して登録しません。
+v1.x の「ローカル AI チャット with 記憶」という設計を継承しつつ、v2.0 では以下の機能を統合した **調停レイヤー** として再定義されています。
 
-### 2. 動的モデルルーティング (Dynamic Model Routing)
-トピックに応じて、最適な LLM を自動的に指名します。
-- **Geopolitics**: 政治・外交に強い Mistral-7B 等
-- **Code/Technical**: 専門知識に特化した Qwen-9B 等
-- **General**: 日常会話に適した軽量モデル
+- **名前の再定義**: Assistant → **Adapter** (外部ツール群のコネクターとして機能)
+- **Trust-Aware Routing**: 各モデルの信頼スコア（Trust Score）に基づいた動的ルーティング。
+- **Bias & Neutrality**: LFM (Liquid Foundation Model) による非同期バイアス検出。
+- **Pipeline Integration**: n8n 等の外部自動化ツールからのデータインジェスト対応。
 
-### 3. バイアス検知 & 信頼性管理 (Bias Checker & Trust Registry)
-特定の見解に偏った回答や、不自然なトークン注入を検知します。
-- **リアルタイム検知**: 回答内容を LFM (Liquid Foundation Model) でスキャンし、バイアススコアを算出。
-- **モデル評価**: 各モデルの過去の「誠実さ」をスコアリングし、ルーティングの優先順位に反映。
+## 🌟 主要コンポーネント
 
-### 4. ローカルファースト & プライバシー
-すべてのデータ、すべての推論はあなたの PC 内で完結します。
-- **DB**: ChromaDB (ベクトル検索) + JSON (構造化データ)
-- **Engine**: LM Studio (Local Server)
+### 1. ModelRouter (Orchestrator)
+クエリの内容を分析し、最適なモデル（Mistral, Qwen, LFM 等）に動的に振り分けます。GPU(Arc A580) と CPU(Ryzen/Core i7) のリソース配分を最適化し、複数モデルの常駐を実現します。
 
-## 🚀 クイックスタート
+### 2. BiasChecker (Guardrail)
+LFM を用いて、モデルの出力に含まれるイデオロギー的バイアス、プロパガンダフレーミング、または不自然なトークン注入をリアルタイムで監視・フラグ立てします。
 
-### 前提条件
-- [LM Studio](https://lmstudio.ai/) がインストールされ、Local Server (Port 1234) が起動していること。
-- Python 3.10 以上
-- Node.js 18 以上
+### 3. TrustRegistry (Governance)
+モデルごとの出力信頼性を定量的に追跡。バイアス検出履歴に基づき、ルーティングの優先順位を動的に変更します。
 
-### 起動方法
-ルートディレクトリにあるバッチファイルを実行するだけで、バックエンドとフロントエンドが同時に立ち上がります。
+### 4. MemorySchema v2.0
+モデルの出所（model_origin）、信頼スコア（trust_score）、バイアスフラグ（bias_flag）を保持する拡張スキーマ。
 
-```bash
-./start_plama.bat
-```
-
-手動で起動する場合：
-- **Backend**: `uvicorn main:app --reload --port 8000`
-- **Frontend**: `cd frontend && npm run dev`
-
-## 🏗 アーキテクチャ
-
-- **Frontend**: Next.js 14, Tailwind CSS, TypeScript
-- **Backend**: FastAPI (Python), ChromaDB, Sentence-Transformers
-- **Inference**: OpenAI Compatible API (LM Studio)
-
-## 🛠 カスタマイズ
-`memory_data/config.json` を通じて、メインモデルや集約用モデルを自由に変更可能です。UI の「Models」タブからも直感的に設定できます。
+## 🚀 外部連携 (n8n Pipeline)
+n8n を介して外部メディア（外交部、国営メディア等）からプロパガンダコーパスを収集し、PLAMA の ChromaDB にインジェスト。回答の「フレーミング類似度」の判定基準として活用します。
 
 ---
-*PLAMA 2.0 - Developed for Personal Growth and Knowledge Management.*
+*PLAMA 2.0 Adapter - AI Middleware for Trusted Intelligence.*
