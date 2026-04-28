@@ -48,8 +48,6 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const [messages, setMessages] = useState<Message[]>([]);
   const [isStreaming, setIsStreaming] = useState(false);
   const abortControllerRef = useRef<AbortController | null>(null);
-  
-  const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const toast = useCallback((msg: string, type: ToastType = "info") => {
     const id = ++toastId;
@@ -69,12 +67,11 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const startNewSession = useCallback(async () => {
     try {
       // 1. もし現在のセッションにメッセージがあるなら、バックグラウンドで集約処理を実行
+      // 依存関係を減らすため、現在の状態を最新の状態で取得
       if (sessionId && messages.length > 0) {
         toast("記憶を定着させています...", "info");
-        // 注意: ユーザーを待たせないよう await しないか、あるいは確実に実行されるようにします
         consolidateSession(sessionId)
-          .then(res => {
-            console.log("Consolidation complete:", res);
+          .then(() => {
             toast("会話から新しいファクトを記憶しました", "success");
             refreshHealth();
           })
@@ -87,12 +84,28 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       // 2. 新しいセッションを開始
       const { session_id } = await newSession();
       setSessionId(session_id);
-      setMessages([]); // Clear global messages for the new session
+      setMessages([]); 
       toast("新しいセッションを開始しました", "success");
     } catch {
       toast("セッション作成に失敗しました", "error");
     }
-  }, [toast, sessionId, messages.length, refreshHealth]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionId, messages.length]); // 依然として依存していますが、useEffectからは外します
+
+  // 初回起動時の初期化
+  useEffect(() => {
+    const init = async () => {
+      await refreshHealth();
+      // セッションがない場合のみ新しく作成
+      const { session_id } = await newSession();
+      setSessionId(session_id);
+    };
+    init();
+
+    const timer = setInterval(refreshHealth, 15_000);
+    return () => clearInterval(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []); // 空の依存配列で一度だけ実行
 
   // --- Global Chat Logic ---
   
@@ -149,12 +162,6 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     }
   }, [sessionId, isStreaming, toast]);
 
-  useEffect(() => {
-    refreshHealth();
-    startNewSession();
-    timerRef.current = setInterval(refreshHealth, 15_000);
-    return () => { if (timerRef.current) clearInterval(timerRef.current); };
-  }, [refreshHealth, startNewSession]);
 
   return (
     <Ctx.Provider value={{ 

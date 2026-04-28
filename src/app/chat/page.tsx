@@ -15,7 +15,7 @@ interface Message {
 let msgId = 0;
 
 export default function ChatPage() {
-  const { sessionId, health, messages, isStreaming, sendMessage, stopStreaming } = useApp();
+  const { sessionId, health, messages, isStreaming, sendMessage, stopStreaming, toast } = useApp();
   const [input, setInput] = useState("");
   const [overrideModel, setOverrideModel] = useState("");
   const [modelOptions, setModelOptions] = useState<string[]>([]);
