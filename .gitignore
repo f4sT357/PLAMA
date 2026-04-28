@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+ENV/
+
+# Node.js
+node_modules/
+.next/
+out/
+build/
+dist/
+.env*
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# PLAMA Data (Privacy first - do not push personal memory)
+memory_data/
+*.tmp
+
+# OS
+.DS_Store
+Thumbs.db
