@@ -1,34 +1,41 @@
-# 🧠 PLAMA 2.0 (Persistent Local AI Memory Adapter)
+🧠 PLAMA 2.0 (Persistent Local AI Memory Adapter)
+“AI Middleware Layer — Trust-Aware Multi-Model Orchestration”
 
-> **"AI Middleware Layer — Trust-Aware Multi-Model Orchestration"**
+PLAMA 2.0 は、単体のチャットアシスタントではなく、複数の AI コンポーネントを統合的に扱いながら、記憶と出力の一貫性を管理するためのミドルウェアレイヤーです。（現在テスト段階）
 
-PLAMA 2.0 は、単なるチャットアシスタントを超え、信頼性の異なる複数の AI コンポーネントを調停し、記憶と信頼性を一元管理する **AI ミドルウェアレイヤー** です。(現在テスト待ち)
+🛠️ v2.0 の設計転換 (Adapter Edition)
 
-## 🛠️ v2.0 の設計転換 (Adapter Edition)
+v1.x の「ローカル AI チャット＋記憶」構成を引き継ぎつつ、v2.0 では以下の要素を追加し、調停・統合レイヤーとして再設計されています。
 
-v1.x の「ローカル AI チャット with 記憶」という設計を継承しつつ、v2.0 では以下の機能を統合した **調停レイヤー** として再定義されています。
+名前の再定義: Assistant → Adapter（外部システムを接続・調整する役割）
+Trust-Aware Routing: 各モデルの信頼性指標に基づいた動的ルーティング
+Bias / Neutrality Monitoring: 出力傾向の偏りを検知する軽量評価レイヤー
+Pipeline Integration: n8n などの外部自動化ツールとの連携対応
+🌟 主要コンポーネント
+1. ModelRouter (Orchestrator)
 
-- **名前の再定義**: Assistant → **Adapter** (外部ツール群のコネクターとして機能)
-- **Trust-Aware Routing**: 各モデルの信頼スコア（Trust Score）に基づいた動的ルーティング。
-- **Bias & Neutrality**: LFM (Liquid Foundation Model) による非同期バイアス検出。
-- **Pipeline Integration**: n8n 等の外部自動化ツールからのデータインジェスト対応。
+入力クエリの内容に応じて、最適なモデル（Mistral, Qwen, LFM など）へ動的に振り分けます。
+ローカル環境（GPU: Arc A580 / CPU: Ryzen or Core i7）のリソース状況も考慮し、複数モデルの並行運用を支援します。
 
-## 🌟 主要コンポーネント
+2. BiasChecker (Guardrail)
 
-### 1. ModelRouter (Orchestrator)
-クエリの内容を分析し、最適なモデル（Mistral, Qwen, LFM 等）に動的に振り分けます。GPU(Arc A580) と CPU(Ryzen/Core i7) のリソース配分を最適化し、複数モデルの常駐を実現します。
+LFM を活用し、出力内容における偏りや特定の傾向、または不自然なトークンパターンを継続的に監視し、必要に応じてフラグを付与します。
 
-### 2. BiasChecker (Guardrail)
-LFM を用いて、モデルの出力に含まれるイデオロギー的バイアス、プロパガンダフレーミング、または不自然なトークン注入をリアルタイムで監視・フラグ立てします。
+3. TrustRegistry (Governance)
 
-### 3. TrustRegistry (Governance)
-モデルごとの出力信頼性を定量的に追跡。バイアス検出履歴に基づき、ルーティングの優先順位を動的に変更します。
+各モデルの出力品質や安定性を記録し、信頼度スコアとして蓄積します。
+検出履歴をもとに、ルーティング優先度を動的に調整します。
 
-### 4. MemorySchema v2.0
-モデルの出所（model_origin）、信頼スコア（trust_score）、バイアスフラグ（bias_flag）を保持する拡張スキーマ。
+4. MemorySchema v2.0
 
-## 🚀 外部連携 (n8n Pipeline)
-n8n を介して外部メディア（外交部、国営メディア等）からプロパガンダコーパスを収集し、PLAMA の ChromaDB にインジェスト。回答の「フレーミング類似度」の判定基準として活用します。
+以下の情報を拡張スキーマとして保持します：
 
----
-*PLAMA 2.0 Adapter - AI Middleware for Trusted Intelligence.*
+model_origin（モデルの出所）
+trust_score（信頼スコア）
+bias_flag（検知フラグ）
+🚀 外部連携 (n8n Pipeline)
+
+n8n を通じて外部データソースから情報を収集し、PLAMA のデータベース（ChromaDB）へ統合します。
+そのデータは、応答生成時の文脈評価や類似度判定の補助情報として利用されます。
+
+PLAMA 2.0 Adapter — AI Middleware for Coordinated Intelligence.
