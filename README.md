@@ -1,44 +1,42 @@
-🧠 PLAMA 2.0
-AI Middleware Layer for Trust-Aware Multi-Model Orchestration
+# PLAMA / middleware — ModelRouter
 
-PLAMA 2.0 は、複数のLLMを統合的に扱い、
-出力の信頼性・記憶・ルーティングを管理するローカルAIミドルウェアです。
+PLAMAのモデルルーティング層。組み合わせることで動作する想定。
 
-🎯 What it does
-タスクごとに最適なLLMへ自動ルーティング
-モデル出力の信頼性を記録・評価
-ローカル環境で複数モデルを統合運用
-外部データソースと連携したコンテキスト拡張
-⚖️ Trade-offs
-メモリ使用量が増加
-初期ロード時間が長い
-システム構成が複雑化する代わりに柔軟性が向上
-🛠 Architecture (v2.0)
-ModelRouter
+---
 
-入力に応じて最適なモデルへ動的ルーティング
+## What it does
 
-BiasChecker
+入力タスクの特性とモデルのバイアス方向を照合し、
+最適なLLMへ動的にルーティングする。
 
-出力傾向や異常パターンの検出
+ルーティング基準はコスト・レイテンシではなく**バイアス軸**。
 
-TrustRegistry
+---
 
-モデルごとの信頼スコア管理と最適化
+## Routing logic
 
-MemorySchema
-model_origin
-trust_score
-bias_flag
-🚀 External Integration
+| タスク分類 | ルーティング先 | 理由 |
+|---|---|---|
+| RAG・要約・バイアス検出 | LFM2-8B A1B | 高速・軽量・十分な精度 |
+| 精度重視・複雑な推論 | Qwen3 9B Q4_K_M | 精度優先 |
+| 地政学・倫理・事実確認 | モデル複数並列 | バイアス三角測量 |
 
-n8n経由で外部データを収集し、ChromaDBへ統合。
-応答生成時の補助コンテキストとして利用。
+---
 
-🧠 Philosophy
+## Design philosophy
 
-PLAMA 2.0 treats LLMs as components to orchestrate, not standalone systems.
+- **性悪説ベースの信頼設計** — モデルはデフォルトで信頼しない。スコアは実績から積む
+- **知識は外部注入** — モデルに事実を持たせない。RAGで与える
+- **ローカルファースト** — Arc A580 / ノートPC 16GB で完結動作
 
-一言で表すと:
+---
 
-“LLMを使う”から“LLM群を運用する”への移行レイヤー
+## Stack
+
+LangGraph / FastAPI / LM Studio
+
+---
+
+## Status
+
+v2.0 実装中 — PLAMA本体から分離予定
