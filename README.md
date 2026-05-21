@@ -18,7 +18,7 @@ PLAMA 2.0 は、ローカル LLM (LM Studio) をエンジンとして活用し�
 - **Code/Technical**: 専門知識に特化した Qwen-9B 等
 - **General**: 日常会話に適した軽量モデル
 
-### 3. バイアス検知 & 信頼性管理 (Bias Checker & Trust Registry)
+### 3. バイアス検知 & 信頼性管理 (Bias Checker & Trust Registry)(実装中)
 特定の見解に偏った回答や、不自然なトークン注入を検知します。
 - **リアルタイム検知**: 回答内容を LFM (Liquid Foundation Model) でスキャンし、バイアススコアを算出。
 - **モデル評価**: 各モデルの過去の「誠実さ」をスコアリングし、ルーティングの優先順位に反映。
