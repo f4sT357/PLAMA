@@ -1,10 +1,11 @@
-# 🧠 PLAMA 2.0 (Personal Local AI Memory Assistant)
+#  PLAMA 2.0 (Personal Local AI Memory Assistant)
 
 > **「忘れない、偏らない、あなただけのAI」**
 
 PLAMA 2.0 は、ローカル LLM (LM Studio) をエンジンとして活用し、ユーザーとの会話から永続的な「記憶（事実）」を構築・活用する次世代のパーソナルアシスタントです。
+## Goal:一日中(16h)使い続けて文脈を失わずコンテキスト腐敗が体感不能であること、想定使用環境でllm動作速度が人間の文章を読む速度を常に上回る状態を維持できること
 
-## 🌟 主な特徴
+##  主な特徴
 
 ### 1. 鉄壁の記憶集約 (Robust Memory Consolidation)
 会話の節目に、LLM が内容を分析して重要な事実を抽出します。
@@ -45,13 +46,13 @@ PLAMA 2.0 は、ローカル LLM (LM Studio) をエンジンとして活用し�
 - **Backend**: `uvicorn main:app --reload --port 8000`
 - **Frontend**: `cd frontend && npm run dev`
 
-## 🏗 アーキテクチャ
+## アーキテクチャ
 
 - **Frontend**: Next.js 14, Tailwind CSS, TypeScript
 - **Backend**: FastAPI (Python), ChromaDB, Sentence-Transformers
 - **Inference**: OpenAI Compatible API (LM Studio)
 
-## 🛠 カスタマイズ
+##  カスタマイズ
 `memory_data/config.json` を通じて、メインモデルや集約用モデルを自由に変更可能です。UI の「Models」タブからも直感的に設定できます。
 
 ---
