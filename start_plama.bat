@@ -1,6 +1,6 @@
 @echo off
 :: PLAMA v1.4 Startup Script
-:: Prerequisites: Python 3.11+, LM Studio running on localhost:1234
+:: Prerequisites: Python 3.10+, Node.js 20.9+, LM Studio running on localhost:1234
 
 setlocal
 
@@ -45,7 +45,7 @@ if exist "%FRONTEND%\package.json" (
     start "PLAMA Frontend" cmd /k "cd /d %FRONTEND% && npm run dev"
 ) else (
     echo [SKIP] Frontend not found at %FRONTEND%
-    echo        Run: npx create-next-app@latest frontend
+    echo        Restore package.json in the repository root and run npm install.
 )
 
 echo.
