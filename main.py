@@ -274,7 +274,7 @@ async def chat_stream(req: ChatRequest, background_tasks: BackgroundTasks):
     schema = memory_manager.get_schema()
     system_prompt = prompt_builder.build_system_prompt(schema, relevant_facts=relevant_facts)
     history = memory_manager.get_recent_messages(n=8)
-    messages = prompt_builder.build_messages(system_prompt, history[:-0] if history else [], req.message)
+    messages = prompt_builder.build_messages(system_prompt, history, req.message)
 
     # Record user message once
     memory_manager.add_message("user", req.message)
@@ -336,7 +336,6 @@ async def chat_stream(req: ChatRequest, background_tasks: BackgroundTasks):
 
         # Record assistant message
         memory_manager.add_message("assistant", full_response, model_used=model_cfg.name)
-        trust_registry.record_output(model_cfg.name, bias_flagged=False)
         background_tasks.add_task(_background_bias_check, full_response, model_cfg.name)
 
         meta = {
@@ -381,6 +380,8 @@ async def consolidate_session(session_id: str):
             
         logger.info("Parsed consolidation data: summary=%s, facts_count=%d", 
                     parsed.get("summary", ""), len(parsed.get("facts", [])))
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error("Consolidation LLM error (%s): %s", type(e).__name__, e, exc_info=True)
         raise HTTPException(
@@ -626,7 +627,7 @@ async def _background_consolidate(session_id: str, model_name: str, model_url: s
         raw = raw.strip()
         if raw.startswith("```"):
             raw = raw.split("\n", 1)[1].rsplit("```", 1)[0]
-        parsed = json.loads(raw)
+        parsed = _try_repair_json(raw)
         await memory_manager.consolidate_session(
             session_id=session_id,
             summary=parsed.get("summary", ""),
@@ -639,12 +640,15 @@ async def _background_consolidate(session_id: str, model_name: str, model_url: s
 
 
 async def _background_bias_check(text: str, model_name: str):
-    """Run bias check and update TrustRegistry. v1.4: rule-based."""
+    """Run bias check and record exactly one trust outcome per model response."""
     try:
         result = await bias_checker.check_async(text, model_origin=model_name)
-        if result["bias_score"] > 0.3:
-            trust_registry.record_output(model_name, bias_flagged=True)
+        flagged = result["bias_score"] > 0.3
+        trust_registry.record_output(model_name, bias_flagged=flagged)
+        if flagged:
             logger.warning("Bias detected from %s: score=%.2f flags=%s",
                            model_name, result["bias_score"], result["flags"])
     except Exception as e:
         logger.error("Background bias check error: %s", e)
+        # Count the response once even when the optional bias checker fails.
+        trust_registry.record_output(model_name, bias_flagged=False)
