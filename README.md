@@ -33,7 +33,7 @@ PLAMA 2.0 は、ローカル LLM (LM Studio) をエンジンとして活用し�
 ### 前提条件
 - [LM Studio](https://lmstudio.ai/) がインストールされ、Local Server (Port 1234) が起動していること。
 - Python 3.10 以上
-- Node.js 18 以上
+- Node.js 20.9 以上 (Next.js 16 の要件)
 
 ### 起動方法
 ルートディレクトリにあるバッチファイルを実行するだけで、バックエンドとフロントエンドが同時に立ち上がります。
@@ -44,11 +44,11 @@ PLAMA 2.0 は、ローカル LLM (LM Studio) をエンジンとして活用し�
 
 手動で起動する場合：
 - **Backend**: `uvicorn main:app --reload --port 8000`
-- **Frontend**: `cd frontend && npm run dev`
+- **Frontend**: `npm run dev` (リポジトリルートで実行)
 
 ## アーキテクチャ
 
-- **Frontend**: Next.js 14, Tailwind CSS, TypeScript
+- **Frontend**: Next.js 16, React 19, TypeScript
 - **Backend**: FastAPI (Python), ChromaDB, Sentence-Transformers
 - **Inference**: OpenAI Compatible API (LM Studio)
 

@@ -251,6 +251,8 @@ def _is_refusal(text: str) -> bool:
 
 # --- Chat (SSE streaming) ---
 
+MID_SESSION_CONSOLIDATIONS_IN_PROGRESS: set[str] = set()
+
 @app.post("/api/chat/stream", tags=["core"])
 async def chat_stream(req: ChatRequest, background_tasks: BackgroundTasks):
     session_id = req.session_id
@@ -274,7 +276,7 @@ async def chat_stream(req: ChatRequest, background_tasks: BackgroundTasks):
     schema = memory_manager.get_schema()
     system_prompt = prompt_builder.build_system_prompt(schema, relevant_facts=relevant_facts)
     history = memory_manager.get_recent_messages(n=8)
-    messages = prompt_builder.build_messages(system_prompt, history[:-0] if history else [], req.message)
+    messages = prompt_builder.build_messages(system_prompt, history, req.message)
 
     # Record user message once
     memory_manager.add_message("user", req.message)
@@ -330,13 +332,18 @@ async def chat_stream(req: ChatRequest, background_tasks: BackgroundTasks):
                 yield f"data: {json.dumps({'error': f'All models failed: {str(e)}'})}\n\n"
                 return
 
-        # Mid-session consolidation check (async)
-        if memory_manager.should_mid_consolidate():
-            background_tasks.add_task(_background_consolidate, session_id, model_cfg.name, model_cfg.url)
+        # Schedule at most one consolidation per session at a time.
+        if (
+            memory_manager.should_mid_consolidate()
+            and session_id not in MID_SESSION_CONSOLIDATIONS_IN_PROGRESS
+        ):
+            MID_SESSION_CONSOLIDATIONS_IN_PROGRESS.add(session_id)
+            background_tasks.add_task(
+                _background_consolidate, session_id, model_cfg.name, model_cfg.url
+            )
 
         # Record assistant message
         memory_manager.add_message("assistant", full_response, model_used=model_cfg.name)
-        trust_registry.record_output(model_cfg.name, bias_flagged=False)
         background_tasks.add_task(_background_bias_check, full_response, model_cfg.name)
 
         meta = {
@@ -381,6 +388,8 @@ async def consolidate_session(session_id: str):
             
         logger.info("Parsed consolidation data: summary=%s, facts_count=%d", 
                     parsed.get("summary", ""), len(parsed.get("facts", [])))
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error("Consolidation LLM error (%s): %s", type(e).__name__, e, exc_info=True)
         raise HTTPException(
@@ -618,33 +627,41 @@ async def corpus_rebuild():
 # ===========================================================================
 
 async def _background_consolidate(session_id: str, model_name: str, model_url: str):
-    """Mid-session partial consolidation (v1.4)."""
+    """Consolidate a snapshot without deleting messages received during inference."""
     try:
         messages = memory_manager.get_recent_messages(n=20)
+        if not messages:
+            return
         prompt = prompt_builder.build_consolidation_prompt(messages)
         raw = await _llm_complete(model_url, model_name, [{"role": "user", "content": prompt}])
         raw = raw.strip()
         if raw.startswith("```"):
             raw = raw.split("\n", 1)[1].rsplit("```", 1)[0]
-        parsed = json.loads(raw)
+        parsed = _try_repair_json(raw)
         await memory_manager.consolidate_session(
             session_id=session_id,
             summary=parsed.get("summary", ""),
             extracted_facts=parsed.get("facts", []),
             model_used=model_name,
+            clear_through_timestamp=messages[-1].timestamp,
         )
         logger.info("Mid-session consolidation completed for %s", session_id)
     except Exception as e:
         logger.error("Background consolidation error: %s", e)
+    finally:
+        MID_SESSION_CONSOLIDATIONS_IN_PROGRESS.discard(session_id)
 
 
 async def _background_bias_check(text: str, model_name: str):
-    """Run bias check and update TrustRegistry. v1.4: rule-based."""
+    """Run bias check and record exactly one trust outcome per model response."""
     try:
         result = await bias_checker.check_async(text, model_origin=model_name)
-        if result["bias_score"] > 0.3:
-            trust_registry.record_output(model_name, bias_flagged=True)
+        flagged = result["bias_score"] > 0.3
+        trust_registry.record_output(model_name, bias_flagged=flagged)
+        if flagged:
             logger.warning("Bias detected from %s: score=%.2f flags=%s",
                            model_name, result["bias_score"], result["flags"])
     except Exception as e:
         logger.error("Background bias check error: %s", e)
+        # Count the response once even when the optional bias checker fails.
+        trust_registry.record_output(model_name, bias_flagged=False)
