@@ -44,7 +44,7 @@ PLAMA 2.0 は、ローカル LLM (LM Studio) をエンジンとして活用し�
 
 手動で起動する場合：
 - **Backend**: `uvicorn main:app --reload --port 8000`
-- **Frontend**: `cd frontend && npm run dev`
+- **Frontend**: `npm run dev` (リポジトリルートで実行)
 
 ## アーキテクチャ
 
