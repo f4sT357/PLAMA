@@ -7,7 +7,7 @@ setlocal
 set PLAMA_ROOT=%~dp0
 set BACKEND=%PLAMA_ROOT%
 set MEMORY_DIR=%PLAMA_ROOT%memory_data
-set FRONTEND=%PLAMA_ROOT%frontend
+set FRONTEND=%PLAMA_ROOT%
 
 :: Create memory_data dirs if missing
 if not exist "%MEMORY_DIR%" mkdir "%MEMORY_DIR%"
