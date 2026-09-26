@@ -251,6 +251,8 @@ def _is_refusal(text: str) -> bool:
 
 # --- Chat (SSE streaming) ---
 
+MID_SESSION_CONSOLIDATIONS_IN_PROGRESS: set[str] = set()
+
 @app.post("/api/chat/stream", tags=["core"])
 async def chat_stream(req: ChatRequest, background_tasks: BackgroundTasks):
     session_id = req.session_id
@@ -330,9 +332,15 @@ async def chat_stream(req: ChatRequest, background_tasks: BackgroundTasks):
                 yield f"data: {json.dumps({'error': f'All models failed: {str(e)}'})}\n\n"
                 return
 
-        # Mid-session consolidation check (async)
-        if memory_manager.should_mid_consolidate():
-            background_tasks.add_task(_background_consolidate, session_id, model_cfg.name, model_cfg.url)
+        # Schedule at most one consolidation per session at a time.
+        if (
+            memory_manager.should_mid_consolidate()
+            and session_id not in MID_SESSION_CONSOLIDATIONS_IN_PROGRESS
+        ):
+            MID_SESSION_CONSOLIDATIONS_IN_PROGRESS.add(session_id)
+            background_tasks.add_task(
+                _background_consolidate, session_id, model_cfg.name, model_cfg.url
+            )
 
         # Record assistant message
         memory_manager.add_message("assistant", full_response, model_used=model_cfg.name)
@@ -619,9 +627,11 @@ async def corpus_rebuild():
 # ===========================================================================
 
 async def _background_consolidate(session_id: str, model_name: str, model_url: str):
-    """Mid-session partial consolidation (v1.4)."""
+    """Consolidate a snapshot without deleting messages received during inference."""
     try:
         messages = memory_manager.get_recent_messages(n=20)
+        if not messages:
+            return
         prompt = prompt_builder.build_consolidation_prompt(messages)
         raw = await _llm_complete(model_url, model_name, [{"role": "user", "content": prompt}])
         raw = raw.strip()
@@ -633,10 +643,13 @@ async def _background_consolidate(session_id: str, model_name: str, model_url: s
             summary=parsed.get("summary", ""),
             extracted_facts=parsed.get("facts", []),
             model_used=model_name,
+            clear_through_timestamp=messages[-1].timestamp,
         )
         logger.info("Mid-session consolidation completed for %s", session_id)
     except Exception as e:
         logger.error("Background consolidation error: %s", e)
+    finally:
+        MID_SESSION_CONSOLIDATIONS_IN_PROGRESS.discard(session_id)
 
 
 async def _background_bias_check(text: str, model_name: str):
