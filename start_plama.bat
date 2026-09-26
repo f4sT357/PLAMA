@@ -5,7 +5,7 @@
 setlocal
 
 set PLAMA_ROOT=%~dp0
-set BACKEND=%PLAMA_ROOT%backend
+set BACKEND=%PLAMA_ROOT%
 set MEMORY_DIR=%PLAMA_ROOT%memory_data
 set FRONTEND=%PLAMA_ROOT%frontend
 
