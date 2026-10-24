@@ -280,6 +280,7 @@ class MemoryManager:
         summary: str,
         extracted_facts: list[dict],
         model_used: str = "unknown",
+        clear_through_timestamp: str | None = None,
     ) -> dict:
         """
         Write session summary and upsert consolidated facts.
@@ -314,8 +315,17 @@ class MemoryManager:
             else:
                 skipped += 1
 
-        # Clear short-term for next session
-        self._schema.short_term.messages = []
+        # Manual consolidation clears the active context. Mid-session
+        # consolidation removes only the messages included in its snapshot,
+        # preserving messages received while the LLM was processing.
+        if clear_through_timestamp is None:
+            self._schema.short_term.messages = []
+        else:
+            self._schema.short_term.messages = [
+                message
+                for message in self._schema.short_term.messages
+                if message.timestamp > clear_through_timestamp
+            ]
         self._save_schema()
 
         logger.info("Consolidation done: added=%d skipped=%d(dup)", added, skipped)

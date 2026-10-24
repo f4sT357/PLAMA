@@ -1,13 +1,13 @@
 @echo off
 :: PLAMA v1.4 Startup Script
-:: Prerequisites: Python 3.11+, LM Studio running on localhost:1234
+:: Prerequisites: Python 3.10+, Node.js 20.9+, LM Studio running on localhost:1234
 
 setlocal
 
 set PLAMA_ROOT=%~dp0
-set BACKEND=%PLAMA_ROOT%backend
+set BACKEND=%PLAMA_ROOT%
 set MEMORY_DIR=%PLAMA_ROOT%memory_data
-set FRONTEND=%PLAMA_ROOT%frontend
+set FRONTEND=%PLAMA_ROOT%
 
 :: Create memory_data dirs if missing
 if not exist "%MEMORY_DIR%" mkdir "%MEMORY_DIR%"
@@ -45,7 +45,7 @@ if exist "%FRONTEND%\package.json" (
     start "PLAMA Frontend" cmd /k "cd /d %FRONTEND% && npm run dev"
 ) else (
     echo [SKIP] Frontend not found at %FRONTEND%
-    echo        Run: npx create-next-app@latest frontend
+    echo        Restore package.json in the repository root and run npm install.
 )
 
 echo.
