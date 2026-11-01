@@ -6,7 +6,7 @@ import json
 import pytest
 
 # Reuse lightweight Chroma / embeddings fakes.
-from test_memory_reliability import mm as memory_fixture  # noqa: F401
+from test_memory_reliability import mm  # noqa: F401
 import memory_manager as mod
 
 
@@ -23,7 +23,7 @@ def backend(mm, monkeypatch):
     async def fake_llm(url, model, messages, max_tokens=1500):
         prompt = messages[0]["content"]
         # The source message ID is present in a fixed user turn.
-        mid = mm.get_pending_messages(mm.get_current_session_id())[-1].id
+        mid = next(msg.id for msgs in mm.get_schema().session_messages.values() for msg in msgs\n                   if "I prefer local model portability" in msg.content)
         return json.dumps({
             "summary": "User configuration",
             "facts": [{
