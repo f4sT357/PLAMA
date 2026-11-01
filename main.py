@@ -32,6 +32,7 @@ from models import (
     RouteQueryResponse,
     PlamaConfig,
     UpdateConfigRequest,
+    ReplaceFactRequest,
 )
 from config_manager import ConfigManager
 from pipeline_ingest import pipeline_ingest
@@ -447,6 +448,14 @@ async def get_memory():
 async def get_facts(source_type: str | None = None):
     facts = memory_manager.get_facts(source_type=source_type)
     return {"facts": [f.model_dump() for f in facts], "count": len(facts)}
+
+
+@app.put("/api/memory/facts/{fact_id}", tags=["memory"])
+async def replace_fact(fact_id: str, req: ReplaceFactRequest):
+    updated = memory_manager.replace_fact(fact_id, req.content)
+    if updated is None:
+        raise HTTPException(404, f"Active fact not found: {fact_id}")
+    return updated.model_dump()
 
 
 @app.delete("/api/memory/facts/{fact_id}", tags=["memory"])
