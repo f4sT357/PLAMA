@@ -46,6 +46,8 @@ class FactEntry(BaseModel):
     status: Literal["active", "superseded", "disputed"] = "active"
     assertion_kind: Literal["explicit", "inference", "plan", "hypothesis", "unknown"] = "unknown"
     evidence_message_ids: list[str] = Field(default_factory=list)
+    evidence_quote: Optional[str] = None
+    conflict_candidates: list[str] = Field(default_factory=list)
     supersedes: list[str] = Field(default_factory=list)
     valid_from: Optional[str] = None
     valid_to: Optional[str] = None
