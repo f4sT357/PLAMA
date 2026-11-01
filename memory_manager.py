@@ -267,6 +267,7 @@ class MemoryManager:
         session_id: str | None = None,
         assertion_kind: str = "unknown",
         evidence_message_ids: list[str] | None = None,
+        evidence_quote: str | None = None,
     ) -> FactEntry | None:
         """
         Add a fact after deduplication check.
@@ -291,6 +292,8 @@ class MemoryManager:
             expires_at=expires_at,
             assertion_kind=assertion_kind,
             evidence_message_ids=evidence_message_ids or [],
+            evidence_quote=evidence_quote,
+            conflict_candidates=self._conflict_candidates(content),
         )
         self._schema.facts.append(fact)
         self._index_fact(fact)
@@ -477,13 +480,14 @@ class MemoryManager:
                 content=raw["content"],
                 category=raw.get("category", "other"),
                 confidence=raw.get("confidence", 0.6),
-                source_type="consolidated",
+                source_type="explicit" if raw.get("evidence_message_ids") else "inference",
                 tags=raw.get("tags", []),
                 model_origin=model_used,
                 model_trust_score=trust_score,
                 session_id=session_id,
                 assertion_kind=raw.get("assertion_kind", "unknown"),
                 evidence_message_ids=raw.get("evidence_message_ids", []),
+                evidence_quote=raw.get("evidence_quote"),
             )
             if result:
                 added += 1
@@ -540,6 +544,24 @@ class MemoryManager:
     # ------------------------------------------------------------------
     # Private helpers
     # ------------------------------------------------------------------
+
+    def _conflict_candidates(self, content: str) -> list[str]:
+        """Non-destructive numerical discrepancy detector; candidates need review."""
+        nums = set(re.findall(r"\d+(?:\.\d+)?", content))
+        if not nums:
+            return []
+        tokens = self._lexical_terms(re.sub(r"\d+(?:\.\d+)?", "", content))
+        matched = []
+        for fact in self._schema.facts:
+            if fact.status != "active":
+                continue
+            other_nums = set(re.findall(r"\d+(?:\.\d+)?", fact.content))
+            if not other_nums or other_nums == nums:
+                continue
+            shared = tokens & self._lexical_terms(re.sub(r"\d+(?:\.\d+)?", "", fact.content))
+            if shared:
+                matched.append(fact.id)
+        return matched[:10]
 
     def _is_duplicate(self, content: str, threshold: float = DEDUP_THRESHOLD) -> bool:
         """Only discard exact normalized duplicates, never corrections."""
