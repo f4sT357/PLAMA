@@ -4,7 +4,7 @@ import React, {
 } from "react";
 import { 
   fetchHealth, newSession, HealthResponse, chatStream, ChatMeta, consolidateSession,
-  fetchAvailableModels, fetchTrust, fetchConfig, LMStudioModel, TrustEntry, PlamaConfig, sessionExists
+  fetchAvailableModels, fetchTrust, fetchConfig, LMStudioModel, TrustEntry, PlamaConfig, sessionExists, fetchSessionMessages
 } from "@/lib/api";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -27,6 +27,7 @@ interface AppCtx {
   toasts: Toast[];
   toast: (msg: string, type?: ToastType) => void;
   startNewSession: () => Promise<void>;
+  switchSession: (sessionId: string) => Promise<void>;
   refreshHealth: () => Promise<void>;
   
   // Cached Global Data
@@ -105,6 +106,28 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     }
   }, []);
 
+  const restoreMessages = useCallback(async (sid: string) => {
+    const history = await fetchSessionMessages(sid);
+    setMessages(history.filter(m => m.role !== "system").map(m => ({
+      id: ++msgId,
+      role: m.role as "user" | "assistant",
+      content: m.content,
+      meta: m.model_used ? { model_used: m.model_used, topic: "history", session_id: sid } : undefined,
+    })));
+  }, []);
+
+  const switchSession = useCallback(async (sid: string) => {
+    if (isStreaming) return;
+    try {
+      if (!(await sessionExists(sid))) throw new Error("Unknown session");
+      await restoreMessages(sid);
+      sessionStorage.setItem("plama_session_id", sid);
+      setSessionId(sid);
+    } catch {
+      toast("セッションの復元に失敗しました", "error");
+    }
+  }, [isStreaming, restoreMessages, toast]);
+
   const startNewSession = useCallback(async () => {
     try {
       // 1. もし現在のセッションにメッセージがあるなら、集約処理を完了まで待機
@@ -143,6 +166,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         // sessionStorage isolates ordinary tabs and survives reloads.
         const saved = sessionStorage.getItem("plama_session_id");
         if (saved && await sessionExists(saved)) {
+          await restoreMessages(saved);
           setSessionId(saved);
         } else {
           const { session_id } = await newSession();
@@ -223,7 +247,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
 
   return (
     <Ctx.Provider value={{ 
-      sessionId, health, toasts, toast, startNewSession, refreshHealth,
+      sessionId, health, toasts, toast, startNewSession, switchSession, refreshHealth,
       models, config, trust, loadModels, loadConfig, loadTrust,
       messages, isStreaming, sendMessage, stopStreaming, clearMessages
     }}>
