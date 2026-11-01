@@ -177,6 +177,7 @@ async def _stream_llm(model_url: str, model_name: str, messages: list[dict]) -> 
                 "temperature": 0.7,
             },
         ) as response:
+            response.raise_for_status()
             async for line in response.aiter_lines():
                 if line.startswith("data: "):
                     payload = line[6:]
@@ -252,6 +253,8 @@ def _is_refusal(text: str) -> bool:
 # --- Chat (SSE streaming) ---
 
 MID_SESSION_CONSOLIDATIONS_IN_PROGRESS: set[str] = set()
+# Local model load/unload operations must not interrupt active generations.
+MODEL_INFERENCE_LOCK = asyncio.Lock()
 
 @app.post("/api/chat/stream", tags=["core"])
 async def chat_stream(req: ChatRequest, background_tasks: BackgroundTasks):
@@ -280,7 +283,7 @@ async def chat_stream(req: ChatRequest, background_tasks: BackgroundTasks):
     # Record user message once
     memory_manager.add_message(session_id, "user", req.message)
 
-    async def event_stream():
+    async def _stream_response():
         nonlocal model_cfg
         
         # --- Attempt 1: Initial Model ---
@@ -361,6 +364,11 @@ async def chat_stream(req: ChatRequest, background_tasks: BackgroundTasks):
         }
         yield f"data: {json.dumps({'done': True, 'meta': meta})}\n\n"
 
+    async def event_stream():
+        async with MODEL_INFERENCE_LOCK:
+            async for event in _stream_response():
+                yield event
+
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 
 
@@ -380,12 +388,28 @@ async def _consolidate_snapshot(session_id: str, model_name: str, model_url: str
     if not messages:
         return {"status": "no_messages", "session_id": session_id}
     prompt = prompt_builder.build_consolidation_prompt(messages)
-    raw = await _llm_complete(
-        model_url, model_name, [{"role": "user", "content": prompt}], max_tokens=1500
-    )
+    async with MODEL_INFERENCE_LOCK:
+        if not await model_router.ensure_model_loaded(model_name):
+            raise RuntimeError(f"Could not load consolidation model: {model_name}")
+        raw = await _llm_complete(
+            model_url, model_name, [{"role": "user", "content": prompt}], max_tokens=1500
+        )
     parsed = _try_repair_json(raw)
     if not isinstance(parsed, dict) or not isinstance(parsed.get("facts"), list) or not isinstance(parsed.get("summary"), str):
         raise ValueError("Invalid consolidation response: expected summary string and facts array")
+    valid_user_ids = {m.id for m in messages if m.role == "user"}
+    for fact in parsed["facts"]:
+        if not isinstance(fact, dict):
+            raise ValueError("Invalid fact")
+        claimed_ids = fact.get("evidence_message_ids", [])
+        if not isinstance(claimed_ids, list):
+            raise ValueError("Invalid evidence IDs")
+        fact["evidence_message_ids"] = [
+            mid for mid in claimed_ids if isinstance(mid, str) and mid in valid_user_ids
+        ]
+        if not fact["evidence_message_ids"]:
+            # Store uncertain data, but do not mislabel it as a verified user statement.
+            fact["assertion_kind"] = "unknown"
     result = await memory_manager.consolidate_session(
         session_id=session_id,
         summary=parsed["summary"],
@@ -534,7 +558,8 @@ async def load_model(req: ModelLoadRequest):
     """
     Load a model in LM Studio using the robust router logic.
     """
-    success = await model_router.ensure_model_loaded(req.model_name)
+    async with MODEL_INFERENCE_LOCK:
+        success = await model_router.ensure_model_loaded(req.model_name)
     return {
         "success": success,
         "model": req.model_name,
@@ -553,7 +578,7 @@ async def unload_model(body: dict):
     if not model_name:
         raise HTTPException(400, "model_name is required")
 
-    async with httpx.AsyncClient(timeout=15.0) as client:
+    async with MODEL_INFERENCE_LOCK, httpx.AsyncClient(timeout=15.0) as client:
         # --- Try LM Studio v0.3.x unload endpoint ---
         try:
             encoded = urllib.parse.quote(model_name, safe="")
@@ -645,7 +670,8 @@ async def _background_consolidate(session_id: str, model_name: str, model_url: s
 async def _background_bias_check(text: str, model_name: str):
     """Run bias check and record exactly one trust outcome per model response."""
     try:
-        result = await bias_checker.check_async(text, model_origin=model_name)
+        async with MODEL_INFERENCE_LOCK:
+            result = await bias_checker.check_async(text, model_origin=model_name)
         flagged = result["bias_score"] > 0.3
         trust_registry.record_output(model_name, bias_flagged=flagged)
         if flagged:
