@@ -398,7 +398,8 @@ async def _consolidate_snapshot(session_id: str, model_name: str, model_url: str
     parsed = _try_repair_json(raw)
     if not isinstance(parsed, dict) or not isinstance(parsed.get("facts"), list) or not isinstance(parsed.get("summary"), str):
         raise ValueError("Invalid consolidation response: expected summary string and facts array")
-    valid_user_ids = {m.id for m in messages if m.role == "user"}
+    user_messages = {m.id: m.content for m in messages if m.role == "user"}
+    valid_user_ids = set(user_messages)
     for fact in parsed["facts"]:
         if not isinstance(fact, dict):
             raise ValueError("Invalid fact")
@@ -408,8 +409,14 @@ async def _consolidate_snapshot(session_id: str, model_name: str, model_url: str
         fact["evidence_message_ids"] = [
             mid for mid in claimed_ids if isinstance(mid, str) and mid in valid_user_ids
         ]
+        quote = fact.get("evidence_quote")
+        if not isinstance(quote, str) or not quote.strip() or not any(
+            quote in user_messages[mid] for mid in fact["evidence_message_ids"]
+        ):
+            fact["evidence_message_ids"] = []
+            fact["evidence_quote"] = None
         if not fact["evidence_message_ids"]:
-            # Store uncertain data, but do not mislabel it as a verified user statement.
+            # Keep tentative extraction but do not mark it as an explicit statement.
             fact["assertion_kind"] = "unknown"
     result = await memory_manager.consolidate_session(
         session_id=session_id,
