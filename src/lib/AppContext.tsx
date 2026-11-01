@@ -4,7 +4,7 @@ import React, {
 } from "react";
 import { 
   fetchHealth, newSession, HealthResponse, chatStream, ChatMeta, consolidateSession,
-  fetchAvailableModels, fetchTrust, fetchConfig, LMStudioModel, TrustEntry, PlamaConfig
+  fetchAvailableModels, fetchTrust, fetchConfig, LMStudioModel, TrustEntry, PlamaConfig, sessionExists
 } from "@/lib/api";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -65,6 +65,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const [messages, setMessages] = useState<Message[]>([]);
   const [isStreaming, setIsStreaming] = useState(false);
   const abortControllerRef = useRef<AbortController | null>(null);
+  const initStarted = useRef(false);
 
   const toast = useCallback((msg: string, type: ToastType = "info") => {
     const id = ++toastId;
@@ -123,6 +124,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
 
       // 2. 新しいセッションを開始
       const { session_id } = await newSession();
+      sessionStorage.setItem("plama_session_id", session_id);
       setSessionId(session_id);
       setMessages([]); 
       toast("新しいセッションを開始しました", "success");
@@ -133,13 +135,25 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
 
   // 初回起動時の初期化
   useEffect(() => {
+    if (initStarted.current) return;
+    initStarted.current = true;
     const init = async () => {
       await refreshHealth();
-      // セッションがない場合のみ新しく作成
-      const { session_id } = await newSession();
-      setSessionId(session_id);
+      try {
+        // sessionStorage isolates ordinary tabs and survives reloads.
+        const saved = sessionStorage.getItem("plama_session_id");
+        if (saved && await sessionExists(saved)) {
+          setSessionId(saved);
+        } else {
+          const { session_id } = await newSession();
+          sessionStorage.setItem("plama_session_id", session_id);
+          setSessionId(session_id);
+        }
+      } catch {
+        toast("セッションを復元できませんでした", "error");
+      }
     };
-    init();
+    void init();
     
     // Initial data load (Only once)
     loadModels();
