@@ -1,0 +1,34 @@
+name: PLAMA reliability checks
+on:
+  push:
+    branches:
+      - improve/memory-reliability-20261102
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  python:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.10", "3.11", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - run: python -m pip install --upgrade pip
+      - run: python -m pip install "pydantic>=2,<3" pytest
+      - run: python -m compileall -q main.py memory_manager.py models.py model_router.py prompt_builder.py bias_checker.py config_manager.py trust_registry.py pipeline_ingest.py
+      - run: python -m pytest -q tests
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - run: npm ci
+      - run: npx tsc --noEmit
