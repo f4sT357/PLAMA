@@ -242,6 +242,33 @@ class MemoryManager:
         logger.info("Fact added: id=%s category=%s", fact.id, fact.category)
         return fact
 
+    def replace_fact(self, fact_id: str, new_content: str) -> FactEntry | None:
+        """An explicit user correction supersedes but does not erase history."""
+        previous = next((f for f in self._schema.facts if f.id == fact_id), None)
+        if previous is None or previous.status != "active":
+            return None
+        content = new_content.strip()
+        if not content:
+            raise ValueError("Cannot replace a fact with empty content")
+        now = datetime.now(timezone.utc).isoformat()
+        correction = FactEntry(
+            content=content,
+            category=previous.category,
+            confidence=0.9,
+            source_type="explicit",
+            assertion_kind="explicit",
+            tags=list(previous.tags),
+            valid_from=now,
+            supersedes=[previous.id],
+        )
+        previous.status = "superseded"
+        previous.valid_to = now
+        previous.updated_at = now
+        self._schema.facts.append(correction)
+        self._index_fact(correction)
+        self._save_schema()
+        return correction
+
     def delete_fact(self, fact_id: str) -> bool:
         before = len(self._schema.facts)
         self._schema.facts = [f for f in self._schema.facts if f.id != fact_id]
