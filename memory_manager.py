@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import shutil
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -83,14 +84,29 @@ class MemoryManager:
 
     def _load_schema(self) -> None:
         if MEMORY_JSON.exists():
+            # Fail closed: an unreadable file must never be replaced with empty memory.
             try:
                 raw = json.loads(MEMORY_JSON.read_text(encoding="utf-8"))
-                # Migrate v1.x → v2.0 by filling missing fields with defaults
                 self._schema = MemorySchema.model_validate(raw)
-                logger.info("Loaded existing memory.json (schema %s)", self._schema.meta.schema_version)
-                return
-            except Exception as e:
-                logger.warning("Failed to parse memory.json: %s — starting fresh", e)
+            except Exception:
+                logger.exception("Cannot read memory.json; leaving the original untouched")
+                raise RuntimeError(
+                    f"Memory database at {MEMORY_JSON} is invalid; restore a backup before starting"
+                ) from None
+
+            # One-time non-destructive migration of the legacy single-session buffer.
+            legacy = self._schema.short_term
+            if legacy.current_session_id and legacy.messages:
+                self._schema.session_messages.setdefault(
+                    legacy.current_session_id, list(legacy.messages)
+                )
+                self._schema.short_term = ShortTermMemory(
+                    current_session_id=legacy.current_session_id
+                )
+                self._save_schema()
+            logger.info("Loaded existing memory.json (schema %s)", self._schema.meta.schema_version)
+            return
+
         self._schema = MemorySchema()
         self._save_schema()
 
@@ -114,11 +130,16 @@ class MemoryManager:
 
     def _save_schema(self) -> None:
         self._schema.bump_updated()
+        payload = self._schema.model_dump_json(by_alias=True, indent=2)
+        # Validate before touching durable state.
+        json.loads(payload)
         tmp = MEMORY_JSON.with_suffix(".tmp")
-        tmp.write_text(
-            self._schema.model_dump_json(by_alias=True, indent=2),
-            encoding="utf-8",
-        )
+        with tmp.open("w", encoding="utf-8") as f:
+            f.write(payload)
+            f.flush()
+            os.fsync(f.fileno())
+        if MEMORY_JSON.exists():
+            shutil.copy2(MEMORY_JSON, MEMORY_JSON.with_suffix(".json.bak"))
         tmp.replace(MEMORY_JSON)
 
     def _embed(self, texts: list[str]) -> list[list[float]]:
@@ -130,38 +151,44 @@ class MemoryManager:
 
     def new_session(self) -> str:
         session_id = f"sess_{datetime.now(timezone.utc).strftime('%Y%m%d')}_{uuid.uuid4().hex[:6]}"
-        self._schema.short_term = ShortTermMemory(current_session_id=session_id)
+        # Never discard another session's pending messages.
+        self._schema.session_messages[session_id] = []
+        self._schema.session_consolidation_cursor[session_id] = 0
+        self._schema.short_term.current_session_id = session_id
         self._schema.sessions.append(SessionEntry(
             id=session_id,
             started_at=datetime.now(timezone.utc).isoformat(),
         ))
-        # Cap sessions at 100
-        if len(self._schema.sessions) > 100:
-            self._schema.sessions = self._schema.sessions[-100:]
         self._save_schema()
         logger.info("New session: %s", session_id)
         return session_id
 
-    def add_message(self, role: str, content: str, model_used: str | None = None) -> None:
+    def session_exists(self, session_id: str) -> bool:
+        return session_id in self._schema.session_messages
+
+    def add_message(
+        self, session_id: str, role: str, content: str, model_used: str | None = None
+    ) -> None:
+        if not self.session_exists(session_id):
+            raise ValueError(f"Unknown session: {session_id}")
         msg = MessageEntry(role=role, content=content, model_used=model_used)  # type: ignore[arg-type]
-        self._schema.short_term.messages.append(msg)
-        # Enforce max_messages
-        if len(self._schema.short_term.messages) > self._schema.short_term.max_messages:
-            self._schema.short_term.messages = self._schema.short_term.messages[
-                -self._schema.short_term.max_messages:
-            ]
-        # v1.4: mid-session consolidation trigger
-        if len(self._schema.short_term.messages) >= MID_SESSION_CONSOLIDATE_THRESHOLD:
-            logger.info("Mid-session threshold reached (%d messages); auto-consolidation pending",
-                        len(self._schema.short_term.messages))
-            # Flag is checked by caller (main.py); actual consolidation is async
+        self._schema.session_messages[session_id].append(msg)
+        # Raw messages are intentionally not pruned. Consolidation is a derived view.
         self._save_schema()
 
-    def should_mid_consolidate(self) -> bool:
-        return len(self._schema.short_term.messages) >= MID_SESSION_CONSOLIDATE_THRESHOLD
+    def get_recent_messages(self, session_id: str, n: int = 10) -> list[MessageEntry]:
+        if not self.session_exists(session_id):
+            raise ValueError(f"Unknown session: {session_id}")
+        return self._schema.session_messages[session_id][-n:]
 
-    def get_recent_messages(self, n: int = 10) -> list[MessageEntry]:
-        return self._schema.short_term.messages[-n:]
+    def get_pending_messages(self, session_id: str) -> list[MessageEntry]:
+        if not self.session_exists(session_id):
+            raise ValueError(f"Unknown session: {session_id}")
+        cursor = self._schema.session_consolidation_cursor.get(session_id, 0)
+        return list(self._schema.session_messages[session_id][cursor:])
+
+    def should_mid_consolidate(self, session_id: str) -> bool:
+        return len(self.get_pending_messages(session_id)) >= MID_SESSION_CONSOLIDATE_THRESHOLD
 
     def get_current_session_id(self) -> str | None:
         return self._schema.short_term.current_session_id
@@ -280,29 +307,38 @@ class MemoryManager:
         summary: str,
         extracted_facts: list[dict],
         model_used: str = "unknown",
-        clear_through_timestamp: str | None = None,
+        last_snapshot_message_id: str | None = None,
     ) -> dict:
-        """
-        Write session summary and upsert consolidated facts.
-        Called from main.py after LLM generates summary + fact extraction.
-        """
-        # Update session record
-        for sess in self._schema.sessions:
-            if sess.id == session_id:
-                sess.ended_at = datetime.now(timezone.utc).isoformat()
-                sess.summary = summary
-                sess.message_count = len(self._schema.short_term.messages)
-                if model_used not in sess.models_used:
-                    sess.models_used.append(model_used)
-                break
+        """Commit derived facts while retaining all original messages."""
+        if not self.session_exists(session_id):
+            raise ValueError(f"Unknown session: {session_id}")
+        messages = self._schema.session_messages[session_id]
+        cursor = self._schema.session_consolidation_cursor.get(session_id, 0)
+        if not last_snapshot_message_id:
+            raise ValueError("Consolidation requires a stable message snapshot ID")
+        idx = next((i for i, msg in enumerate(messages) if msg.id == last_snapshot_message_id), None)
+        if idx is None:
+            raise ValueError("Unknown snapshot message ID")
+        if idx < cursor:
+            return {"added": 0, "skipped_duplicates": 0, "session_id": session_id,
+                    "already_consolidated": True}
 
-        added = 0
-        skipped = 0
+        # Validate the entire model response before any facts are committed.
+        if not isinstance(extracted_facts, list) or not isinstance(summary, str):
+            raise ValueError("Invalid consolidation response")
+        for raw in extracted_facts:
+            if not isinstance(raw, dict) or not isinstance(raw.get("content"), str):
+                raise ValueError("Invalid fact in consolidation response")
+            FactEntry(
+                content=raw["content"], category=raw.get("category", "other"),
+                confidence=raw.get("confidence", 0.6),
+            )
+
+        added = skipped = 0
         trust_score = self._get_model_trust(model_used)
-
         for raw in extracted_facts:
             result = self.add_fact(
-                content=raw.get("content", ""),
+                content=raw["content"],
                 category=raw.get("category", "other"),
                 confidence=raw.get("confidence", 0.6),
                 source_type="consolidated",
@@ -315,20 +351,19 @@ class MemoryManager:
             else:
                 skipped += 1
 
-        # Manual consolidation clears the active context. Mid-session
-        # consolidation removes only the messages included in its snapshot,
-        # preserving messages received while the LLM was processing.
-        if clear_through_timestamp is None:
-            self._schema.short_term.messages = []
-        else:
-            self._schema.short_term.messages = [
-                message
-                for message in self._schema.short_term.messages
-                if message.timestamp > clear_through_timestamp
-            ]
-        self._save_schema()
+        for sess in self._schema.sessions:
+            if sess.id == session_id:
+                sess.summary = summary
+                sess.message_count = idx + 1
+                if model_used not in sess.models_used:
+                    sess.models_used.append(model_used)
+                # Only mark ended when the snapshot includes the last message.
+                if idx + 1 == len(messages):
+                    sess.ended_at = datetime.now(timezone.utc).isoformat()
+                break
 
-        logger.info("Consolidation done: added=%d skipped=%d(dup)", added, skipped)
+        self._schema.session_consolidation_cursor[session_id] = idx + 1
+        self._save_schema()
         return {"added": added, "skipped_duplicates": skipped, "session_id": session_id}
 
     # ------------------------------------------------------------------
