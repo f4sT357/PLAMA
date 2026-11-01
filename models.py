@@ -58,6 +58,7 @@ class MessageEntry(BaseModel):
     content: str
     timestamp: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     model_used: Optional[str] = None   # v2.0: which model generated this
+    id: str = Field(default_factory=lambda: f"msg_{uuid4().hex}")
 
 
 class ShortTermMemory(BaseModel):
@@ -132,6 +133,9 @@ class MemorySchema(BaseModel):
     facts: list[FactEntry] = Field(default_factory=list)
     sessions: list[SessionEntry] = Field(default_factory=list)
     short_term: ShortTermMemory = Field(default_factory=ShortTermMemory)
+    # Session-keyed, append-only original messages. The legacy short_term field is migrated on load.
+    session_messages: dict[str, list[MessageEntry]] = Field(default_factory=dict)
+    session_consolidation_cursor: dict[str, int] = Field(default_factory=dict)
     model_trust_registry: dict[str, ModelTrustEntry] = Field(default_factory=dict)
 
     model_config = {"populate_by_name": True}
