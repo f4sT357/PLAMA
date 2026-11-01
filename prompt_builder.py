@@ -93,7 +93,7 @@ class PromptBuilder:
         core_str = "\n".join(profile_lines) if profile_lines else "(none)"
 
         # Relevant facts
-        facts_to_show = relevant_facts or schema.facts[-n_facts:]
+        facts_to_show = relevant_facts if relevant_facts is not None else schema.facts[-n_facts:]
         normal_facts = [f for f in facts_to_show if not f.bias_flag]
         flagged_facts = [f for f in facts_to_show if f.bias_flag]
 
