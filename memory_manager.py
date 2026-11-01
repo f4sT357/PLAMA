@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import os
 import shutil
 import uuid
@@ -208,13 +209,17 @@ class MemoryManager:
         model_trust_score: float = 0.0,
         expires_at: str | None = None,
         session_id: str | None = None,
+        assertion_kind: str = "unknown",
+        evidence_message_ids: list[str] | None = None,
     ) -> FactEntry | None:
         """
         Add a fact after deduplication check.
         Returns None if considered duplicate.
         """
+        # Semantic similarity does NOT imply equality. A changed number or a
+        # negation must be retained, even if the embeddings are nearly identical.
         if self._is_duplicate(content):
-            logger.info("Duplicate fact skipped: %r", content[:60])
+            logger.info("Exact duplicate fact skipped")
             return None
 
         session_id = session_id or self._schema.short_term.current_session_id
@@ -228,6 +233,8 @@ class MemoryManager:
             model_trust_score=model_trust_score,
             source_session=session_id,
             expires_at=expires_at,
+            assertion_kind=assertion_kind,
+            evidence_message_ids=evidence_message_ids or [],
         )
         self._schema.facts.append(fact)
         self._index_fact(fact)
@@ -254,28 +261,73 @@ class MemoryManager:
             facts = [f for f in facts if f.source_type == source_type]
         return facts
 
+    @staticmethod
+    def _lexical_terms(text: str) -> set[str]:
+        """Conservative local lexical index; Japanese bigrams + ASCII words."""
+        chunks = re.findall(r"[a-z0-9_]+|[\u3040-\u30ff\u3400-\u9fff]+", text.casefold())
+        terms: set[str] = set()
+        for chunk in chunks:
+            if any(ord(char) > 127 for char in chunk):
+                terms.update(chunk[i:i + 2] for i in range(max(0, len(chunk) - 1)))
+                if len(chunk) == 1:
+                    terms.add(chunk)
+            else:
+                terms.add(chunk)
+        return terms
+
+    @staticmethod
+    def _fact_is_current(fact: FactEntry) -> bool:
+        if fact.status != "active":
+            return False
+        if fact.expires_at:
+            try:
+                expiry = datetime.fromisoformat(fact.expires_at.replace("Z", "+00:00"))
+                if expiry.tzinfo is None:
+                    expiry = expiry.replace(tzinfo=timezone.utc)
+                return expiry > datetime.now(timezone.utc)
+            except ValueError:
+                # Unknown expiry is not proof that a fact is still current.
+                return False
+        return True
+
     def search_facts(self, query: str, n_results: int = 5) -> list[FactEntry]:
-        """Semantic search over ChromaDB-indexed facts."""
+        """Hybrid reciprocal-rank fusion; recover lexical matches if vector index fails."""
+        if not query.strip() or n_results <= 0:
+            return []
+        candidates = {f.id: f for f in self._schema.facts if self._fact_is_current(f)}
+        if not candidates:
+            return []
+        width = max(n_results * 5, 20)
+        dense_ids: list[str] = []
         try:
             col = self._chroma.get_collection(CHROMA_FACTS_COLLECTION)
-            if col.count() == 0:
-                return []
-            emb = self._embed([query])[0]
-            results = col.query(
-                query_embeddings=[emb],
-                n_results=min(n_results, col.count()),
-                include=["documents", "distances"],
-            )
-            ids = results["ids"][0]
-            distances = results["distances"][0]
-            id_score = dict(zip(ids, distances))
-            # Return FactEntry objects in order
-            matched = [f for f in self._schema.facts if f.id in id_score]
-            matched.sort(key=lambda f: id_score.get(f.id, 1.0))
-            return matched
+            if col.count() > 0:
+                emb = self._embed([query])[0]
+                result = col.query(
+                    query_embeddings=[emb],
+                    n_results=min(width, col.count()),
+                    include=["distances"],
+                )
+                dense_ids = [fid for fid in result["ids"][0] if fid in candidates]
         except Exception as e:
-            logger.error("search_facts error: %s", e)
-            return []
+            logger.warning("Vector index unavailable; lexical retrieval remains active: %s", e)
+
+        query_terms = self._lexical_terms(query)
+        lexical = []
+        if query_terms:
+            for fact in candidates.values():
+                common = query_terms & self._lexical_terms(fact.content)
+                if common:
+                    lexical.append((len(common) / len(query_terms), fact.id))
+        lexical.sort(key=lambda row: (-row[0], row[1]))
+        lexical_ids = [fid for _, fid in lexical[:width]]
+
+        scores: dict[str, float] = {}
+        for ids in (dense_ids, lexical_ids):
+            for i, fid in enumerate(ids):
+                scores[fid] = scores.get(fid, 0.0) + 1.0 / (60 + i + 1)
+        best = sorted(scores, key=lambda fid: (-scores[fid], fid))[:n_results]
+        return [candidates[fid] for fid in best]
 
     def rebuild_chroma_index(self) -> int:
         """Rebuild ChromaDB from memory.json. Returns count of indexed facts."""
@@ -347,6 +399,8 @@ class MemoryManager:
                 model_origin=model_used,
                 model_trust_score=trust_score,
                 session_id=session_id,
+                assertion_kind=raw.get("assertion_kind", "unknown"),
+                evidence_message_ids=raw.get("evidence_message_ids", []),
             )
             if result:
                 added += 1
@@ -405,26 +459,12 @@ class MemoryManager:
     # ------------------------------------------------------------------
 
     def _is_duplicate(self, content: str, threshold: float = DEDUP_THRESHOLD) -> bool:
-        """
-        v1.4 deduplication: embed the new content, query ChromaDB,
-        if closest distance < threshold → duplicate.
-        """
-        try:
-            col = self._chroma.get_collection(CHROMA_FACTS_COLLECTION)
-            if col.count() == 0:
-                return False
-            emb = self._embed([content])[0]
-            results = col.query(
-                query_embeddings=[emb],
-                n_results=1,
-                include=["distances"],
-            )
-            if results["distances"] and results["distances"][0]:
-                closest_dist = results["distances"][0][0]
-                return closest_dist < threshold
-        except Exception as e:
-            logger.warning("Dedup check error: %s", e)
-        return False
+        """Only discard exact normalized duplicates, never corrections."""
+        canonical = " ".join(content.casefold().split())
+        return any(
+            f.status == "active" and " ".join(f.content.casefold().split()) == canonical
+            for f in self._schema.facts
+        )
 
     def _index_fact(self, fact: FactEntry) -> None:
         try:
