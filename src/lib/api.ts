@@ -24,6 +24,21 @@ export interface NewSessionResponse {
   created_at: string;
 }
 
+export interface SessionSummary {
+  id: string;
+  started_at: string;
+  message_count: number;
+  pending_count: number;
+}
+
+export interface StoredMessage {
+  id: string;
+  role: "user" | "assistant" | "system";
+  content: string;
+  model_used: string | null;
+  timestamp: string;
+}
+
 export interface ChatRequest {
   session_id: string;
   message: string;
@@ -113,6 +128,18 @@ export async function fetchHealth(): Promise<HealthResponse> {
   const r = await fetch(`${API_BASE}/api/health`);
   if (!r.ok) throw new Error("Health check failed");
   return r.json();
+}
+
+export async function fetchSessions(): Promise<SessionSummary[]> {
+  const r = await fetch(`${API_BASE}/api/sessions`);
+  if (!r.ok) throw new Error("Session list unavailable");
+  return (await r.json()).sessions;
+}
+
+export async function fetchSessionMessages(sessionId: string): Promise<StoredMessage[]> {
+  const r = await fetch(`${API_BASE}/api/session/${encodeURIComponent(sessionId)}/messages`);
+  if (!r.ok) throw new Error("Session history unavailable");
+  return (await r.json()).messages;
 }
 
 export async function sessionExists(sessionId: string): Promise<boolean> {
