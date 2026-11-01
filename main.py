@@ -318,7 +318,8 @@ async def chat_stream(req: ChatRequest, background_tasks: BackgroundTasks):
                         ModelConfig(name=config.sub_model, url=f"{model_router.LM_STUDIO_BASE}/v1")
             
             yield f"data: {json.dumps({'status': f'Censorship/Error detected. Switching to fallback model {model_cfg.name}...'})}\n\n"
-            yield f"data: {json.dumps({'delta': '\\n\\n[Switching to sub-model due to restriction...]\\n\\n'})}\n\n"
+            switch_notice = "\n\n[Switching to sub-model due to restriction...]\n\n"
+            yield f"data: {json.dumps({'delta': switch_notice})}\n\n"
             
             if not await model_router.ensure_model_loaded(model_cfg.name):
                 yield f"data: {json.dumps({'error': 'Failed to load fallback model'})}\n\n"
