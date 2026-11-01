@@ -195,6 +195,16 @@ export async function fetchFacts(sourceType?: string): Promise<FactList> {
   return r.json();
 }
 
+export async function replaceFact(factId: string, content: string): Promise<Fact> {
+  const r = await fetch(`${API_BASE}/api/memory/facts/${encodeURIComponent(factId)}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ content }),
+  });
+  if (!r.ok) throw new Error("Fact correction failed");
+  return r.json();
+}
+
 export async function deleteFact(factId: string): Promise<{ deleted: string }> {
   const r = await fetch(`${API_BASE}/api/memory/facts/${factId}`, { method: "DELETE" });
   if (!r.ok) throw new Error("Failed to delete fact");
