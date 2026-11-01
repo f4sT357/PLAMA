@@ -207,6 +207,7 @@ class MemoryManager:
         model_origin: str = "unknown",
         model_trust_score: float = 0.0,
         expires_at: str | None = None,
+        session_id: str | None = None,
     ) -> FactEntry | None:
         """
         Add a fact after deduplication check.
@@ -216,7 +217,7 @@ class MemoryManager:
             logger.info("Duplicate fact skipped: %r", content[:60])
             return None
 
-        session_id = self._schema.short_term.current_session_id
+        session_id = session_id or self._schema.short_term.current_session_id
         fact = FactEntry(
             content=content,
             category=category,
@@ -345,6 +346,7 @@ class MemoryManager:
                 tags=raw.get("tags", []),
                 model_origin=model_used,
                 model_trust_score=trust_score,
+                session_id=session_id,
             )
             if result:
                 added += 1
