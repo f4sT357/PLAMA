@@ -3,7 +3,7 @@ import { useCallback, useEffect, useState } from "react";
 import { fetchFacts, deleteFact, rebuildMemory, Fact } from "@/lib/api";
 import { useApp } from "@/lib/AppContext";
 
-const SOURCE_TYPES = ["", "consolidation", "ingest", "manual"];
+const SOURCE_TYPES = ["", "explicit", "inference", "thinking", "consolidated", "unknown"];
 
 export default function MemoryPage() {
   const { toast, refreshHealth } = useApp();
