@@ -79,6 +79,7 @@ def mm(tmp_path, monkeypatch):
     monkeypatch.setattr(mod, "MEMORY_JSON", tmp_path / "memory.json")
     monkeypatch.setattr(mod, "CHROMA_DIR", tmp_path / "chroma")
     monkeypatch.setattr(mod, "CORPUS_DIR", tmp_path / "corpus")
+    monkeypatch.setattr(mod, "SQLITE_DB", tmp_path / "memory.sqlite3")
     manager = mod.MemoryManager()
     manager.init()
     return manager
@@ -91,6 +92,7 @@ def test_invalid_json_never_overwritten(tmp_path, monkeypatch):
     monkeypatch.setattr(mod, "MEMORY_JSON", path)
     monkeypatch.setattr(mod, "CHROMA_DIR", tmp_path / "chroma")
     monkeypatch.setattr(mod, "CORPUS_DIR", tmp_path / "corpus")
+    monkeypatch.setattr(mod, "SQLITE_DB", tmp_path / "memory.sqlite3")
     with pytest.raises(RuntimeError):
         mod.MemoryManager().init()
     assert path.read_text(encoding="utf-8") == "{broken"
@@ -141,6 +143,7 @@ def test_legacy_short_term_is_migrated(tmp_path, monkeypatch):
     monkeypatch.setattr(mod, "MEMORY_JSON", path)
     monkeypatch.setattr(mod, "CHROMA_DIR", tmp_path / "chroma")
     monkeypatch.setattr(mod, "CORPUS_DIR", tmp_path / "corpus")
+    monkeypatch.setattr(mod, "SQLITE_DB", tmp_path / "memory.sqlite3")
     manager = mod.MemoryManager()
     manager.init()
     assert manager.get_recent_messages("old-session")[0].content == "old conversation"
@@ -157,3 +160,35 @@ def test_invalid_fact_does_not_advance_cursor(mm):
             last_snapshot_message_id=snapshot
         ))
     assert len(mm.get_pending_messages(sid)) == 1
+
+def test_manual_fact_correction_preserves_history_and_search(mm):
+    first = mm.add_fact("Uses 42T chainring", category="preferences")
+    second = mm.replace_fact(first.id, "Uses 38T chainring")
+    assert second is not None
+    assert first.status == "superseded"
+    assert first.id in second.supersedes
+    assert first.content == "Uses 42T chainring"
+    results = mm.search_facts("Uses 38T chainring")
+    assert any(f.id == second.id for f in results)
+    assert all(f.id != first.id for f in results)
+
+
+def test_near_duplicate_numbers_not_silently_dropped(mm):
+    first = mm.add_fact("42T chainring", category="context")
+    second = mm.add_fact("38T chainring", category="context")
+    assert first is not None and second is not None
+    assert len(mm.get_facts()) == 2
+
+
+def test_expired_memories_not_returned(mm):
+    mm.add_fact("Temporary value", expires_at="2000-01-01T00:00:00+00:00")
+    assert mm.search_facts("Temporary value") == []
+
+
+def test_raw_messages_stored_in_sqlite_not_json(mm):
+    sid = mm.new_session()
+    mm.add_message(sid, "user", "Only in SQLite raw log")
+    raw_json = mod.MEMORY_JSON.read_text(encoding="utf-8")
+    assert "Only in SQLite raw log" not in raw_json
+    assert "Only in SQLite raw log" in mm.get_recent_messages(sid)[0].content
+    assert mod.SQLITE_DB.exists()
