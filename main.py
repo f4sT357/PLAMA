@@ -32,6 +32,7 @@ from models import (
     RouteQueryResponse,
     PlamaConfig,
     UpdateConfigRequest,
+    ReplaceFactRequest,
 )
 from config_manager import ConfigManager
 from pipeline_ingest import pipeline_ingest
@@ -156,14 +157,7 @@ def _try_repair_json(text: str) -> dict:
         except:
             continue
             
-    # 3. Final desperate attempt: Extract via regex
-    try:
-        summary_match = re.search(r'\"summary\"\s*:\s*\"(.*?)\"', text, re.DOTALL)
-        if summary_match:
-            return {"summary": summary_match.group(1), "facts": []}
-    except:
-        pass
-        
+    # Never silently convert an unparsable fact list into zero extracted facts.
     raise ValueError("JSON repair failed")
 
 
@@ -184,6 +178,7 @@ async def _stream_llm(model_url: str, model_name: str, messages: list[dict]) -> 
                 "temperature": 0.7,
             },
         ) as response:
+            response.raise_for_status()
             async for line in response.aiter_lines():
                 if line.startswith("data: "):
                     payload = line[6:]
@@ -219,13 +214,41 @@ async def health():
         memory_stats={
             "total_facts": len(schema.facts),
             "total_sessions": len(schema.sessions),
-            "short_term_messages": len(schema.short_term.messages),
+            "short_term_messages": len(memory_manager.get_pending_messages(memory_manager.get_current_session_id())) if memory_manager.get_current_session_id() and memory_manager.session_exists(memory_manager.get_current_session_id()) else 0,
             "schema_version": schema.meta.schema_version,
         },
     )
 
 
 # --- Session ---
+
+@app.get("/api/sessions", tags=["core"])
+async def list_sessions():
+    return {"sessions": [
+        {"id": sess.id, "started_at": sess.started_at,
+         "message_count": len(memory_manager.get_recent_messages(sess.id, n=1000000)),
+         "pending_count": len(memory_manager.get_pending_messages(sess.id))}
+        for sess in reversed(memory_manager.get_schema().sessions[-50:])
+        if memory_manager.session_exists(sess.id)
+    ]}
+
+
+@app.get("/api/session/{session_id}/messages", tags=["core"])
+async def list_session_messages(session_id: str, limit: int = 150):
+    if not memory_manager.session_exists(session_id):
+        raise HTTPException(404, f"Unknown session: {session_id}")
+    bounded = max(1, min(limit, 500))
+    return {"messages": [
+        m.model_dump() for m in memory_manager.get_recent_messages(session_id, n=bounded)
+    ]}
+
+
+@app.get("/api/session/{session_id}", tags=["core"])
+async def check_session(session_id: str):
+    if not memory_manager.session_exists(session_id):
+        raise HTTPException(404, f"Unknown session: {session_id}")
+    return {"session_id": session_id, "exists": True}
+
 
 @app.post("/api/session/new", response_model=NewSessionResponse, tags=["core"])
 async def new_session():
@@ -241,7 +264,7 @@ async def new_session():
 REFUSAL_KEYWORDS = [
     "i am sorry", "i'm sorry", "i cannot", "as an ai", "unfortunately",
     "ethical reasons", "安全上の理由", "提供できません", "申し訳ありません",
-    "制限されています", "適切ではありません", "答えられません", "回答できません", "お答えできません", "できない"
+    "制限されています", "適切ではありません", "答えられません", "回答できません", "お答えできません"
 ]
 
 def _is_refusal(text: str) -> bool:
@@ -252,14 +275,15 @@ def _is_refusal(text: str) -> bool:
 # --- Chat (SSE streaming) ---
 
 MID_SESSION_CONSOLIDATIONS_IN_PROGRESS: set[str] = set()
+# Local model load/unload operations must not interrupt active generations.
+MODEL_INFERENCE_LOCK = asyncio.Lock()
 
 @app.post("/api/chat/stream", tags=["core"])
 async def chat_stream(req: ChatRequest, background_tasks: BackgroundTasks):
     session_id = req.session_id
 
-    # Ensure session exists
-    if memory_manager.get_current_session_id() != session_id:
-        memory_manager.new_session()
+    if not memory_manager.session_exists(session_id):
+        raise HTTPException(404, f"Unknown session: {session_id}")
 
     # Determine initial model
     config = config_manager.get_config()
@@ -275,18 +299,20 @@ async def chat_stream(req: ChatRequest, background_tasks: BackgroundTasks):
     relevant_facts = memory_manager.search_facts(req.message, n_results=6)
     schema = memory_manager.get_schema()
     system_prompt = prompt_builder.build_system_prompt(schema, relevant_facts=relevant_facts)
-    history = memory_manager.get_recent_messages(n=8)
+    history = memory_manager.get_recent_messages(session_id, n=8)
     messages = prompt_builder.build_messages(system_prompt, history, req.message)
 
     # Record user message once
-    memory_manager.add_message("user", req.message)
+    memory_manager.add_message(session_id, "user", req.message)
 
-    async def event_stream():
+    async def _stream_response():
         nonlocal model_cfg
         
         # --- Attempt 1: Initial Model ---
         yield f"data: {json.dumps({'status': f'Preparing {model_cfg.name}...'})}\n\n"
-        await model_router.ensure_model_loaded(model_cfg.name)
+        if not await model_router.ensure_model_loaded(model_cfg.name):
+            yield f"data: {json.dumps({'error': 'Failed to load requested model'})}\n\n"
+            return
 
         full_response = ""
         buffer = ""
@@ -317,9 +343,12 @@ async def chat_stream(req: ChatRequest, background_tasks: BackgroundTasks):
                         ModelConfig(name=config.sub_model, url=f"{model_router.LM_STUDIO_BASE}/v1")
             
             yield f"data: {json.dumps({'status': f'Censorship/Error detected. Switching to fallback model {model_cfg.name}...'})}\n\n"
-            yield f"data: {json.dumps({'delta': '\\n\\n[Switching to sub-model due to restriction...]\\n\\n'})}\n\n"
+            switch_notice = "\n\n[Switching to sub-model due to restriction...]\n\n"
+            yield f"data: {json.dumps({'delta': switch_notice})}\n\n"
             
-            await model_router.ensure_model_loaded(model_cfg.name)
+            if not await model_router.ensure_model_loaded(model_cfg.name):
+                yield f"data: {json.dumps({'error': 'Failed to load fallback model'})}\n\n"
+                return
             
             next_response = ""
             try:
@@ -332,9 +361,13 @@ async def chat_stream(req: ChatRequest, background_tasks: BackgroundTasks):
                 yield f"data: {json.dumps({'error': f'All models failed: {str(e)}'})}\n\n"
                 return
 
+        if not full_response.strip():
+            yield f"data: {json.dumps({'error': 'Model returned no response'})}\n\n"
+            return
+
         # Schedule at most one consolidation per session at a time.
         if (
-            memory_manager.should_mid_consolidate()
+            memory_manager.should_mid_consolidate(session_id)
             and session_id not in MID_SESSION_CONSOLIDATIONS_IN_PROGRESS
         ):
             MID_SESSION_CONSOLIDATIONS_IN_PROGRESS.add(session_id)
@@ -343,7 +376,7 @@ async def chat_stream(req: ChatRequest, background_tasks: BackgroundTasks):
             )
 
         # Record assistant message
-        memory_manager.add_message("assistant", full_response, model_used=model_cfg.name)
+        memory_manager.add_message(session_id, "assistant", full_response, model_used=model_cfg.name)
         background_tasks.add_task(_background_bias_check, full_response, model_cfg.name)
 
         meta = {
@@ -353,58 +386,82 @@ async def chat_stream(req: ChatRequest, background_tasks: BackgroundTasks):
         }
         yield f"data: {json.dumps({'done': True, 'meta': meta})}\n\n"
 
+    async def event_stream():
+        async with MODEL_INFERENCE_LOCK:
+            async for event in _stream_response():
+                yield event
+
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 
 
 # --- Consolidate session ---
 
-@app.post("/api/session/{session_id}/consolidate", tags=["core"])
-async def consolidate_session(session_id: str):
-    messages = memory_manager.get_recent_messages(n=50)
+CONSOLIDATION_LOCKS: dict[str, asyncio.Lock] = {}
+
+def _get_consolidation_lock(session_id: str) -> asyncio.Lock:
+    return CONSOLIDATION_LOCKS.setdefault(session_id, asyncio.Lock())
+
+
+async def _consolidate_snapshot(session_id: str, model_name: str, model_url: str) -> dict:
+    """Must be called under the per-session consolidation lock."""
+    if not memory_manager.session_exists(session_id):
+        raise ValueError(f"Unknown session: {session_id}")
+    messages = memory_manager.get_pending_messages(session_id)
     if not messages:
         return {"status": "no_messages", "session_id": session_id}
-
-    # Use consolidation model
-    consol_model = model_router.get_consolidation_model()
     prompt = prompt_builder.build_consolidation_prompt(messages)
-
-    logger.info("Starting consolidation using model: %s (URL: %s)", consol_model.name, consol_model.url)
-
-    try:
+    async with MODEL_INFERENCE_LOCK:
+        if not await model_router.ensure_model_loaded(model_name):
+            raise RuntimeError(f"Could not load consolidation model: {model_name}")
         raw = await _llm_complete(
-            consol_model.url,
-            consol_model.name,
-            [{"role": "user", "content": prompt}],
-            max_tokens=1500,
+            model_url, model_name, [{"role": "user", "content": prompt}], max_tokens=1500
         )
-        logger.info("Consolidation LLM raw response: %s", raw)
-        
-        # Extract JSON block and parse via robust repairer
-        try:
-            parsed = _try_repair_json(raw)
-        except Exception as e:
-            logger.error("JSON extraction/repair failed: %s | Raw content: %s", e, raw)
-            raise HTTPException(500, f"JSON parse error: {e}")
-            
-        logger.info("Parsed consolidation data: summary=%s, facts_count=%d", 
-                    parsed.get("summary", ""), len(parsed.get("facts", [])))
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error("Consolidation LLM error (%s): %s", type(e).__name__, e, exc_info=True)
-        raise HTTPException(
-            status_code=500, 
-            detail=f"Consolidation failed ({type(e).__name__}): {str(e)}"
-        )
-
+    parsed = _try_repair_json(raw)
+    if not isinstance(parsed, dict) or not isinstance(parsed.get("facts"), list) or not isinstance(parsed.get("summary"), str):
+        raise ValueError("Invalid consolidation response: expected summary string and facts array")
+    user_messages = {m.id: m.content for m in messages if m.role == "user"}
+    valid_user_ids = set(user_messages)
+    for fact in parsed["facts"]:
+        if not isinstance(fact, dict):
+            raise ValueError("Invalid fact")
+        claimed_ids = fact.get("evidence_message_ids", [])
+        if not isinstance(claimed_ids, list):
+            raise ValueError("Invalid evidence IDs")
+        fact["evidence_message_ids"] = [
+            mid for mid in claimed_ids if isinstance(mid, str) and mid in valid_user_ids
+        ]
+        quote = fact.get("evidence_quote")
+        if not isinstance(quote, str) or not quote.strip() or not any(
+            quote in user_messages[mid] for mid in fact["evidence_message_ids"]
+        ):
+            fact["evidence_message_ids"] = []
+            fact["evidence_quote"] = None
+        if not fact["evidence_message_ids"]:
+            # Keep tentative extraction but do not mark it as an explicit statement.
+            fact["assertion_kind"] = "unknown"
     result = await memory_manager.consolidate_session(
         session_id=session_id,
-        summary=parsed.get("summary", ""),
-        extracted_facts=parsed.get("facts", []),
-        model_used=consol_model.name,
+        summary=parsed["summary"],
+        extracted_facts=parsed["facts"],
+        model_used=model_name,
+        last_snapshot_message_id=messages[-1].id,
     )
-    logger.info("Consolidation result: %s", result)
     return {"status": "ok", **result}
+
+
+@app.post("/api/session/{session_id}/consolidate", tags=["core"])
+async def consolidate_session(session_id: str):
+    if not memory_manager.session_exists(session_id):
+        raise HTTPException(404, f"Unknown session: {session_id}")
+    consol_model = model_router.get_consolidation_model()
+    async with _get_consolidation_lock(session_id):
+        try:
+            return await _consolidate_snapshot(
+                session_id, consol_model.name, consol_model.url
+            )
+        except Exception as e:
+            logger.exception("Consolidation failed for %s", session_id)
+            raise HTTPException(500, f"Consolidation failed: {type(e).__name__}") from e
 
 
 # --- Memory ---
@@ -419,6 +476,14 @@ async def get_memory():
 async def get_facts(source_type: str | None = None):
     facts = memory_manager.get_facts(source_type=source_type)
     return {"facts": [f.model_dump() for f in facts], "count": len(facts)}
+
+
+@app.put("/api/memory/facts/{fact_id}", tags=["memory"])
+async def replace_fact(fact_id: str, req: ReplaceFactRequest):
+    updated = memory_manager.replace_fact(fact_id, req.content)
+    if updated is None:
+        raise HTTPException(404, f"Active fact not found: {fact_id}")
+    return updated.model_dump()
 
 
 @app.delete("/api/memory/facts/{fact_id}", tags=["memory"])
@@ -530,7 +595,8 @@ async def load_model(req: ModelLoadRequest):
     """
     Load a model in LM Studio using the robust router logic.
     """
-    success = await model_router.ensure_model_loaded(req.model_name)
+    async with MODEL_INFERENCE_LOCK:
+        success = await model_router.ensure_model_loaded(req.model_name)
     return {
         "success": success,
         "model": req.model_name,
@@ -549,12 +615,12 @@ async def unload_model(body: dict):
     if not model_name:
         raise HTTPException(400, "model_name is required")
 
-    async with httpx.AsyncClient(timeout=15.0) as client:
+    async with MODEL_INFERENCE_LOCK, httpx.AsyncClient(timeout=15.0) as client:
         # --- Try LM Studio v0.3.x unload endpoint ---
         try:
             encoded = urllib.parse.quote(model_name, safe="")
             r = await client.delete(f"{LM_STUDIO_BASE}/api/v0/models/{encoded}")
-            if r.status_code < 500:
+            if 200 <= r.status_code < 300:
                 return {"success": True, "method": "v0_unload", "status_code": r.status_code, "model": model_name}
         except Exception as e:
             logger.warning("v0 unload attempt failed: %s", e)
@@ -562,7 +628,7 @@ async def unload_model(body: dict):
         # --- Fallback: no-op (LM Studio manages lifecycle) ---
         logger.info("unload_model: %s — LM Studio manages lifecycle in v1 mode", model_name)
         return {
-            "success": True,
+            "success": False,
             "method": "noop",
             "note": "LM Studio v1 API does not support explicit unload. Use LM Studio UI or upgrade to 0.3.x+",
             "model": model_name,
@@ -627,27 +693,13 @@ async def corpus_rebuild():
 # ===========================================================================
 
 async def _background_consolidate(session_id: str, model_name: str, model_url: str):
-    """Consolidate a snapshot without deleting messages received during inference."""
+    """Serialize with manual consolidation; never delete raw messages."""
     try:
-        messages = memory_manager.get_recent_messages(n=20)
-        if not messages:
-            return
-        prompt = prompt_builder.build_consolidation_prompt(messages)
-        raw = await _llm_complete(model_url, model_name, [{"role": "user", "content": prompt}])
-        raw = raw.strip()
-        if raw.startswith("```"):
-            raw = raw.split("\n", 1)[1].rsplit("```", 1)[0]
-        parsed = _try_repair_json(raw)
-        await memory_manager.consolidate_session(
-            session_id=session_id,
-            summary=parsed.get("summary", ""),
-            extracted_facts=parsed.get("facts", []),
-            model_used=model_name,
-            clear_through_timestamp=messages[-1].timestamp,
-        )
-        logger.info("Mid-session consolidation completed for %s", session_id)
-    except Exception as e:
-        logger.error("Background consolidation error: %s", e)
+        async with _get_consolidation_lock(session_id):
+            result = await _consolidate_snapshot(session_id, model_name, model_url)
+            logger.info("Mid-session consolidation for %s: %s", session_id, result)
+    except Exception:
+        logger.exception("Background consolidation failed for %s", session_id)
     finally:
         MID_SESSION_CONSOLIDATIONS_IN_PROGRESS.discard(session_id)
 
@@ -655,7 +707,8 @@ async def _background_consolidate(session_id: str, model_name: str, model_url: s
 async def _background_bias_check(text: str, model_name: str):
     """Run bias check and record exactly one trust outcome per model response."""
     try:
-        result = await bias_checker.check_async(text, model_origin=model_name)
+        async with MODEL_INFERENCE_LOCK:
+            result = await bias_checker.check_async(text, model_origin=model_name)
         flagged = result["bias_score"] > 0.3
         trust_registry.record_output(model_name, bias_flagged=flagged)
         if flagged:

@@ -35,7 +35,7 @@ if %errorlevel% neq 0 (
 
 echo.
 echo [2/3] Starting PLAMA backend (FastAPI)...
-start "PLAMA Backend" cmd /k "cd /d %BACKEND% && python -m uvicorn main:app --host 0.0.0.0 --port 8000 --reload"
+start "PLAMA Backend" cmd /k "cd /d %BACKEND% && python -m uvicorn main:app --host 127.0.0.1 --port 8000 --reload"
 
 timeout /t 2 /nobreak >nul
 

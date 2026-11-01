@@ -180,6 +180,11 @@ class ModelRouter:
         if config and config.consolidation_model:
             return ModelConfig(name=config.consolidation_model, url=CONSOLIDATION_URL)
         
+        # A configured 4B main model is allowed to consolidate memories.
+        if config and config.main_model:
+            return ModelConfig(name=config.main_model, url=CONSOLIDATION_URL)
+        if self.available_model_ids:
+            return ModelConfig(name=self.available_model_ids[0], url=CONSOLIDATION_URL)
         if CONSOLIDATION_MODEL in self._model_map:
             return self._model_map[CONSOLIDATION_MODEL]
         return self.models[0]

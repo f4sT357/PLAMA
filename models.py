@@ -42,6 +42,15 @@ class FactEntry(BaseModel):
     model_trust_score: float = Field(default=0.0, ge=0.0, le=1.0)
     bias_flag: bool = False
     bias_score: float = Field(default=0.0, ge=0.0, le=1.0)
+    # Additive fields: old memory.json files load with these defaults.
+    status: Literal["active", "superseded", "disputed"] = "active"
+    assertion_kind: Literal["explicit", "inference", "plan", "hypothesis", "unknown"] = "unknown"
+    evidence_message_ids: list[str] = Field(default_factory=list)
+    evidence_quote: Optional[str] = None
+    conflict_candidates: list[str] = Field(default_factory=list)
+    supersedes: list[str] = Field(default_factory=list)
+    valid_from: Optional[str] = None
+    valid_to: Optional[str] = None
 
     @field_validator("confidence")
     @classmethod
@@ -58,6 +67,7 @@ class MessageEntry(BaseModel):
     content: str
     timestamp: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     model_used: Optional[str] = None   # v2.0: which model generated this
+    id: str = Field(default_factory=lambda: f"msg_{uuid4().hex}")
 
 
 class ShortTermMemory(BaseModel):
@@ -132,6 +142,9 @@ class MemorySchema(BaseModel):
     facts: list[FactEntry] = Field(default_factory=list)
     sessions: list[SessionEntry] = Field(default_factory=list)
     short_term: ShortTermMemory = Field(default_factory=ShortTermMemory)
+    # Session-keyed, append-only original messages. The legacy short_term field is migrated on load.
+    session_messages: dict[str, list[MessageEntry]] = Field(default_factory=dict)
+    session_consolidation_cursor: dict[str, int] = Field(default_factory=dict)
     model_trust_registry: dict[str, ModelTrustEntry] = Field(default_factory=dict)
 
     model_config = {"populate_by_name": True}
@@ -150,6 +163,10 @@ class ChatRequest(BaseModel):
     session_id: str
     message: str
     override_model: Optional[str] = None   # force a specific model (debug)
+
+
+class ReplaceFactRequest(BaseModel):
+    content: str = Field(min_length=1)
 
 
 class NewSessionResponse(BaseModel):

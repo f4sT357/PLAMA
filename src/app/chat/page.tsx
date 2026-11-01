@@ -1,6 +1,6 @@
 "use client";
 import { useCallback, useEffect, useRef, useState, KeyboardEvent } from "react";
-import { chatStream, fetchAvailableModels, ChatMeta, consolidateSession } from "@/lib/api";
+import { ChatMeta, consolidateSession, fetchSessions, SessionSummary } from "@/lib/api";
 import { useApp } from "@/lib/AppContext";
 
 interface Message {
@@ -15,12 +15,17 @@ interface Message {
 let msgId = 0;
 
 export default function ChatPage() {
-  const { sessionId, health, messages, isStreaming, sendMessage, stopStreaming, toast, models } = useApp();
+  const { sessionId, health, messages, isStreaming, sendMessage, stopStreaming, toast, models, switchSession } = useApp();
+  const [sessions, setSessions] = useState<SessionSummary[]>([]);
   const [input, setInput] = useState("");
   const [overrideModel, setOverrideModel] = useState("");
   const [modelOptions, setModelOptions] = useState<string[]>([]);
   const bottomRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+  useEffect(() => {
+    fetchSessions().then(setSessions).catch(() => {});
+  }, [sessionId]);
 
   // Sync model options from global cache
   useEffect(() => {
@@ -65,6 +70,15 @@ export default function ChatPage() {
         <div style={{ flex: 1 }} />
         
         <div className="flex items-center gap-3">
+          <select aria-label="過去のセッションを再開" className="select-native"
+            value={sessionId ?? ""} disabled={isStreaming}
+            onChange={e => { void switchSession(e.target.value); }}>
+            {sessionId && !sessions.some(s => s.id === sessionId) &&
+              <option value={sessionId}>現在のセッション</option>}
+            {sessions.map(s => <option key={s.id} value={s.id}>
+              {new Date(s.started_at).toLocaleString("ja-JP")} ({s.message_count}件)
+            </option>)}
+          </select>
           <button
             className="btn btn-secondary btn-sm"
             onClick={async () => {

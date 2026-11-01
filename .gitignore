@@ -38,3 +38,10 @@ Thumbs.db
 .vercel
 *.tsbuildinfo
 next-env.d.ts
+
+# Private local benchmark questions and gold labels
+benchmarks/my_cases.json
+benchmarks/private_*.json
+
+# Generated local private backups
+PLAMA_backups/

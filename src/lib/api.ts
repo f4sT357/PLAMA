@@ -24,6 +24,21 @@ export interface NewSessionResponse {
   created_at: string;
 }
 
+export interface SessionSummary {
+  id: string;
+  started_at: string;
+  message_count: number;
+  pending_count: number;
+}
+
+export interface StoredMessage {
+  id: string;
+  role: "user" | "assistant" | "system";
+  content: string;
+  model_used: string | null;
+  timestamp: string;
+}
+
 export interface ChatRequest {
   session_id: string;
   message: string;
@@ -90,6 +105,7 @@ export interface PlamaConfig {
   main_model: string;
   sub_model: string;
   bias_model: string;
+  consolidation_model: string;
   last_updated: string;
 }
 
@@ -97,6 +113,7 @@ export interface UpdateConfigRequest {
   main_model?: string;
   sub_model?: string;
   bias_model?: string;
+  consolidation_model?: string;
 }
 
 export interface CorpusStats {
@@ -111,6 +128,23 @@ export async function fetchHealth(): Promise<HealthResponse> {
   const r = await fetch(`${API_BASE}/api/health`);
   if (!r.ok) throw new Error("Health check failed");
   return r.json();
+}
+
+export async function fetchSessions(): Promise<SessionSummary[]> {
+  const r = await fetch(`${API_BASE}/api/sessions`);
+  if (!r.ok) throw new Error("Session list unavailable");
+  return (await r.json()).sessions;
+}
+
+export async function fetchSessionMessages(sessionId: string): Promise<StoredMessage[]> {
+  const r = await fetch(`${API_BASE}/api/session/${encodeURIComponent(sessionId)}/messages`);
+  if (!r.ok) throw new Error("Session history unavailable");
+  return (await r.json()).messages;
+}
+
+export async function sessionExists(sessionId: string): Promise<boolean> {
+  const r = await fetch(`${API_BASE}/api/session/${encodeURIComponent(sessionId)}`);
+  return r.ok;
 }
 
 export async function newSession(): Promise<NewSessionResponse> {
@@ -185,6 +219,16 @@ export async function fetchFacts(sourceType?: string): Promise<FactList> {
   if (sourceType) url.searchParams.set("source_type", sourceType);
   const r = await fetch(url.toString());
   if (!r.ok) throw new Error("Failed to fetch facts");
+  return r.json();
+}
+
+export async function replaceFact(factId: string, content: string): Promise<Fact> {
+  const r = await fetch(`${API_BASE}/api/memory/facts/${encodeURIComponent(factId)}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ content }),
+  });
+  if (!r.ok) throw new Error("Fact correction failed");
   return r.json();
 }
 

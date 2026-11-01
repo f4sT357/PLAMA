@@ -73,7 +73,7 @@ export default function ModelsPage() {
     
     // 全て空の場合は、初期ロード失敗の可能性が高いため保存を阻止
     if (!editedConfig.main_model && !editedConfig.consolidation_model) {
-      toast("設定値が空です。モデルを選択してください", "warning");
+      toast("設定値が空です。モデルを選択してください", "info");
       return;
     }
 

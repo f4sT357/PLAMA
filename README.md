@@ -25,7 +25,7 @@ PLAMA 2.0 は、ローカル LLM (LM Studio) をエンジンとして活用し�
 
 ### 4. ローカルファースト & プライバシー
 すべてのデータ、すべての推論はあなたの PC 内で完結します。
-- **DB**: ChromaDB (ベクトル検索) + JSON (構造化データ)
+- **DB**: SQLite (会話原文の永続保存) + JSON (構造化ファクト・設定) + ChromaDB (再構築可能な検索インデックス)
 - **Engine**: LM Studio (Local Server)
 
 ## 🚀 クイックスタート
@@ -49,11 +49,23 @@ PLAMA 2.0 は、ローカル LLM (LM Studio) をエンジンとして活用し�
 ## アーキテクチャ
 
 - **Frontend**: Next.js 16, React 19, TypeScript
-- **Backend**: FastAPI (Python), ChromaDB, Sentence-Transformers
+- **Backend**: FastAPI (Python), SQLite, ChromaDB, Sentence-Transformers
 - **Inference**: OpenAI Compatible API (LM Studio)
 
 ##  カスタマイズ
 `memory_data/config.json` を通じて、メインモデルや集約用モデルを自由に変更可能です。UI の「Models」タブからも直感的に設定できます。
+
+## 安定化ブランチの変更点（2026-11-02）
+- 原文をセッション別にSQLiteへ追記保存し、ページ再読み込み後も過去セッションを再開できます。
+- 破損した memory.json を空データで上書きせず、エラー停止します。
+- 記憶は明示的に訂正でき、旧版を superseded として保存します。
+- 意味検索に日本語文字列・英語単語に基づく検索を併用し、期限切れや superseded の事実を通常検索から除外します。
+- 記憶抽出の根拠として USER メッセージIDと原文引用を検証します。
+- FastAPI は start_plama.bat で localhost にバインドします。
+- バックアップ・復旧手順: [RUNBOOK.md](RUNBOOK.md)
+- 評価ツール: [benchmarks/README.md](benchmarks/README.md)
+
+**注意:** 16時間利用や4Bモデルによる高精度な記憶抽出は開発目標であり、実測による達成確認は未実施です。クラウド提供モデルの接続は現行コードで汎用実装済みとはみなせません。
 
 ## 今後について
 ○記憶のマネジメントについて

@@ -11,7 +11,10 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import os
+import shutil
+import sqlite3
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -42,6 +45,7 @@ MEMORY_DIR = Path(os.getenv("PLAMA_MEMORY_DIR", "./memory_data"))
 MEMORY_JSON = MEMORY_DIR / "memory.json"
 CHROMA_DIR = MEMORY_DIR / "chroma_store"
 CORPUS_DIR = MEMORY_DIR / "corpus_store"
+SQLITE_DB = MEMORY_DIR / "memory.sqlite3"
 
 EMBEDDING_MODEL = os.getenv("PLAMA_EMBEDDING_MODEL", "paraphrase-multilingual-MiniLM-L12-v2")
 
@@ -64,6 +68,8 @@ class MemoryManager:
         self._schema: MemorySchema | None = None
         self._chroma: chromadb.ClientAPI | None = None
         self._embed_model: SentenceTransformer | None = None
+        self._db: sqlite3.Connection | None = None
+        self._needs_migration_save = False
 
     # ------------------------------------------------------------------
     # Initialisation
@@ -76,6 +82,8 @@ class MemoryManager:
         CORPUS_DIR.mkdir(parents=True, exist_ok=True)
 
         self._load_schema()
+        self._init_sqlite()
+        self._load_persistent_messages()
         self._init_chroma()
         self._load_embedding_model()
         logger.info("MemoryManager initialised. facts=%d sessions=%d",
@@ -83,16 +91,73 @@ class MemoryManager:
 
     def _load_schema(self) -> None:
         if MEMORY_JSON.exists():
+            # Fail closed: an unreadable file must never be replaced with empty memory.
             try:
                 raw = json.loads(MEMORY_JSON.read_text(encoding="utf-8"))
-                # Migrate v1.x → v2.0 by filling missing fields with defaults
                 self._schema = MemorySchema.model_validate(raw)
-                logger.info("Loaded existing memory.json (schema %s)", self._schema.meta.schema_version)
-                return
-            except Exception as e:
-                logger.warning("Failed to parse memory.json: %s — starting fresh", e)
+            except Exception:
+                logger.exception("Cannot read memory.json; leaving the original untouched")
+                raise RuntimeError(
+                    f"Memory database at {MEMORY_JSON} is invalid; restore a backup before starting"
+                ) from None
+
+            # One-time non-destructive migration of the legacy single-session buffer.
+            legacy = self._schema.short_term
+            if legacy.current_session_id and legacy.messages:
+                self._schema.session_messages.setdefault(
+                    legacy.current_session_id, list(legacy.messages)
+                )
+                self._schema.short_term = ShortTermMemory(
+                    current_session_id=legacy.current_session_id
+                )
+                # Delay saving until all legacy messages are inserted in SQLite.
+                self._needs_migration_save = True
+            logger.info("Loaded existing memory.json (schema %s)", self._schema.meta.schema_version)
+            return
+
+        # A missing JSON file must not silently discard a populated SQLite store.
+        if SQLITE_DB.exists() and SQLITE_DB.stat().st_size > 0:
+            raise RuntimeError(
+                "memory.json is missing while memory.sqlite3 exists; restore JSON metadata from backup"
+            )
         self._schema = MemorySchema()
         self._save_schema()
+
+    def _init_sqlite(self) -> None:
+        self._db = sqlite3.connect(str(SQLITE_DB), timeout=30)
+        self._db.execute("PRAGMA journal_mode=WAL")
+        self._db.execute("PRAGMA busy_timeout=30000")
+        self._db.execute("""
+            CREATE TABLE IF NOT EXISTS messages (
+                seq INTEGER PRIMARY KEY AUTOINCREMENT,
+                id TEXT NOT NULL UNIQUE,
+                session_id TEXT NOT NULL,
+                message_json TEXT NOT NULL
+            )
+        """)
+        self._db.execute("CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, seq)")
+        self._db.commit()
+
+    def _load_persistent_messages(self) -> None:
+        # Copy older JSON messages once; INSERT OR IGNORE prevents duplicate imports.
+        with self._db:
+            for sid, messages in self._schema.session_messages.items():
+                for msg in messages:
+                    self._db.execute(
+                        "INSERT OR IGNORE INTO messages(id,session_id,message_json) VALUES(?,?,?)",
+                        (msg.id, sid, msg.model_dump_json()),
+                    )
+        recovered: dict[str, list[MessageEntry]] = {
+            sess.id: [] for sess in self._schema.sessions
+        }
+        for sid, json_text in self._db.execute(
+            "SELECT session_id, message_json FROM messages ORDER BY seq"
+        ):
+            recovered.setdefault(sid, []).append(MessageEntry.model_validate_json(json_text))
+        self._schema.session_messages = recovered
+        if self._needs_migration_save:
+            self._save_schema()
+            self._needs_migration_save = False
 
     def _init_chroma(self) -> None:
         self._chroma = chromadb.PersistentClient(
@@ -114,11 +179,17 @@ class MemoryManager:
 
     def _save_schema(self) -> None:
         self._schema.bump_updated()
+        # Raw messages live transactionally in SQLite; JSON stores metadata and derived facts.
+        payload = self._schema.model_dump_json(by_alias=True, indent=2, exclude={"session_messages"})
+        # Validate before touching durable state.
+        json.loads(payload)
         tmp = MEMORY_JSON.with_suffix(".tmp")
-        tmp.write_text(
-            self._schema.model_dump_json(by_alias=True, indent=2),
-            encoding="utf-8",
-        )
+        with tmp.open("w", encoding="utf-8") as f:
+            f.write(payload)
+            f.flush()
+            os.fsync(f.fileno())
+        if MEMORY_JSON.exists():
+            shutil.copy2(MEMORY_JSON, MEMORY_JSON.with_suffix(".json.bak"))
         tmp.replace(MEMORY_JSON)
 
     def _embed(self, texts: list[str]) -> list[list[float]]:
@@ -130,38 +201,51 @@ class MemoryManager:
 
     def new_session(self) -> str:
         session_id = f"sess_{datetime.now(timezone.utc).strftime('%Y%m%d')}_{uuid.uuid4().hex[:6]}"
-        self._schema.short_term = ShortTermMemory(current_session_id=session_id)
+        # Never discard another session's pending messages.
+        self._schema.session_messages[session_id] = []
+        self._schema.session_consolidation_cursor[session_id] = 0
+        self._schema.short_term.current_session_id = session_id
         self._schema.sessions.append(SessionEntry(
             id=session_id,
             started_at=datetime.now(timezone.utc).isoformat(),
         ))
-        # Cap sessions at 100
-        if len(self._schema.sessions) > 100:
-            self._schema.sessions = self._schema.sessions[-100:]
         self._save_schema()
         logger.info("New session: %s", session_id)
         return session_id
 
-    def add_message(self, role: str, content: str, model_used: str | None = None) -> None:
+    def session_exists(self, session_id: str) -> bool:
+        return session_id in self._schema.session_messages
+
+    def add_message(
+        self, session_id: str, role: str, content: str, model_used: str | None = None
+    ) -> None:
+        if not self.session_exists(session_id):
+            raise ValueError(f"Unknown session: {session_id}")
         msg = MessageEntry(role=role, content=content, model_used=model_used)  # type: ignore[arg-type]
-        self._schema.short_term.messages.append(msg)
-        # Enforce max_messages
-        if len(self._schema.short_term.messages) > self._schema.short_term.max_messages:
-            self._schema.short_term.messages = self._schema.short_term.messages[
-                -self._schema.short_term.max_messages:
-            ]
-        # v1.4: mid-session consolidation trigger
-        if len(self._schema.short_term.messages) >= MID_SESSION_CONSOLIDATE_THRESHOLD:
-            logger.info("Mid-session threshold reached (%d messages); auto-consolidation pending",
-                        len(self._schema.short_term.messages))
-            # Flag is checked by caller (main.py); actual consolidation is async
+        # Commit the original message first; even if the JSON metadata save fails,
+        # messages can be reconstructed from the SQLite event log.
+        with self._db:
+            self._db.execute(
+                "INSERT INTO messages(id,session_id,message_json) VALUES(?,?,?)",
+                (msg.id, session_id, msg.model_dump_json()),
+            )
+        self._schema.session_messages[session_id].append(msg)
+        # Raw messages are intentionally never pruned.
         self._save_schema()
 
-    def should_mid_consolidate(self) -> bool:
-        return len(self._schema.short_term.messages) >= MID_SESSION_CONSOLIDATE_THRESHOLD
+    def get_recent_messages(self, session_id: str, n: int = 10) -> list[MessageEntry]:
+        if not self.session_exists(session_id):
+            raise ValueError(f"Unknown session: {session_id}")
+        return self._schema.session_messages[session_id][-n:]
 
-    def get_recent_messages(self, n: int = 10) -> list[MessageEntry]:
-        return self._schema.short_term.messages[-n:]
+    def get_pending_messages(self, session_id: str) -> list[MessageEntry]:
+        if not self.session_exists(session_id):
+            raise ValueError(f"Unknown session: {session_id}")
+        cursor = self._schema.session_consolidation_cursor.get(session_id, 0)
+        return list(self._schema.session_messages[session_id][cursor:])
+
+    def should_mid_consolidate(self, session_id: str) -> bool:
+        return len(self.get_pending_messages(session_id)) >= MID_SESSION_CONSOLIDATE_THRESHOLD
 
     def get_current_session_id(self) -> str | None:
         return self._schema.short_term.current_session_id
@@ -180,16 +264,22 @@ class MemoryManager:
         model_origin: str = "unknown",
         model_trust_score: float = 0.0,
         expires_at: str | None = None,
+        session_id: str | None = None,
+        assertion_kind: str = "unknown",
+        evidence_message_ids: list[str] | None = None,
+        evidence_quote: str | None = None,
     ) -> FactEntry | None:
         """
         Add a fact after deduplication check.
         Returns None if considered duplicate.
         """
+        # Semantic similarity does NOT imply equality. A changed number or a
+        # negation must be retained, even if the embeddings are nearly identical.
         if self._is_duplicate(content):
-            logger.info("Duplicate fact skipped: %r", content[:60])
+            logger.info("Exact duplicate fact skipped")
             return None
 
-        session_id = self._schema.short_term.current_session_id
+        session_id = session_id or self._schema.short_term.current_session_id
         fact = FactEntry(
             content=content,
             category=category,
@@ -200,12 +290,43 @@ class MemoryManager:
             model_trust_score=model_trust_score,
             source_session=session_id,
             expires_at=expires_at,
+            assertion_kind=assertion_kind,
+            evidence_message_ids=evidence_message_ids or [],
+            evidence_quote=evidence_quote,
+            conflict_candidates=self._conflict_candidates(content),
         )
         self._schema.facts.append(fact)
         self._index_fact(fact)
         self._save_schema()
         logger.info("Fact added: id=%s category=%s", fact.id, fact.category)
         return fact
+
+    def replace_fact(self, fact_id: str, new_content: str) -> FactEntry | None:
+        """An explicit user correction supersedes but does not erase history."""
+        previous = next((f for f in self._schema.facts if f.id == fact_id), None)
+        if previous is None or previous.status != "active":
+            return None
+        content = new_content.strip()
+        if not content:
+            raise ValueError("Cannot replace a fact with empty content")
+        now = datetime.now(timezone.utc).isoformat()
+        correction = FactEntry(
+            content=content,
+            category=previous.category,
+            confidence=0.9,
+            source_type="explicit",
+            assertion_kind="explicit",
+            tags=list(previous.tags),
+            valid_from=now,
+            supersedes=[previous.id],
+        )
+        previous.status = "superseded"
+        previous.valid_to = now
+        previous.updated_at = now
+        self._schema.facts.append(correction)
+        self._index_fact(correction)
+        self._save_schema()
+        return correction
 
     def delete_fact(self, fact_id: str) -> bool:
         before = len(self._schema.facts)
@@ -226,28 +347,73 @@ class MemoryManager:
             facts = [f for f in facts if f.source_type == source_type]
         return facts
 
+    @staticmethod
+    def _lexical_terms(text: str) -> set[str]:
+        """Conservative local lexical index; Japanese bigrams + ASCII words."""
+        chunks = re.findall(r"[a-z0-9_]+|[\u3040-\u30ff\u3400-\u9fff]+", text.casefold())
+        terms: set[str] = set()
+        for chunk in chunks:
+            if any(ord(char) > 127 for char in chunk):
+                terms.update(chunk[i:i + 2] for i in range(max(0, len(chunk) - 1)))
+                if len(chunk) == 1:
+                    terms.add(chunk)
+            else:
+                terms.add(chunk)
+        return terms
+
+    @staticmethod
+    def _fact_is_current(fact: FactEntry) -> bool:
+        if fact.status != "active":
+            return False
+        if fact.expires_at:
+            try:
+                expiry = datetime.fromisoformat(fact.expires_at.replace("Z", "+00:00"))
+                if expiry.tzinfo is None:
+                    expiry = expiry.replace(tzinfo=timezone.utc)
+                return expiry > datetime.now(timezone.utc)
+            except ValueError:
+                # Unknown expiry is not proof that a fact is still current.
+                return False
+        return True
+
     def search_facts(self, query: str, n_results: int = 5) -> list[FactEntry]:
-        """Semantic search over ChromaDB-indexed facts."""
+        """Hybrid reciprocal-rank fusion; recover lexical matches if vector index fails."""
+        if not query.strip() or n_results <= 0:
+            return []
+        candidates = {f.id: f for f in self._schema.facts if self._fact_is_current(f)}
+        if not candidates:
+            return []
+        width = max(n_results * 5, 20)
+        dense_ids: list[str] = []
         try:
             col = self._chroma.get_collection(CHROMA_FACTS_COLLECTION)
-            if col.count() == 0:
-                return []
-            emb = self._embed([query])[0]
-            results = col.query(
-                query_embeddings=[emb],
-                n_results=min(n_results, col.count()),
-                include=["documents", "distances"],
-            )
-            ids = results["ids"][0]
-            distances = results["distances"][0]
-            id_score = dict(zip(ids, distances))
-            # Return FactEntry objects in order
-            matched = [f for f in self._schema.facts if f.id in id_score]
-            matched.sort(key=lambda f: id_score.get(f.id, 1.0))
-            return matched
+            if col.count() > 0:
+                emb = self._embed([query])[0]
+                result = col.query(
+                    query_embeddings=[emb],
+                    n_results=min(width, col.count()),
+                    include=["distances"],
+                )
+                dense_ids = [fid for fid in result["ids"][0] if fid in candidates]
         except Exception as e:
-            logger.error("search_facts error: %s", e)
-            return []
+            logger.warning("Vector index unavailable; lexical retrieval remains active: %s", e)
+
+        query_terms = self._lexical_terms(query)
+        lexical = []
+        if query_terms:
+            for fact in candidates.values():
+                common = query_terms & self._lexical_terms(fact.content)
+                if common:
+                    lexical.append((len(common) / len(query_terms), fact.id))
+        lexical.sort(key=lambda row: (-row[0], row[1]))
+        lexical_ids = [fid for _, fid in lexical[:width]]
+
+        scores: dict[str, float] = {}
+        for ids in (dense_ids, lexical_ids):
+            for i, fid in enumerate(ids):
+                scores[fid] = scores.get(fid, 0.0) + 1.0 / (60 + i + 1)
+        best = sorted(scores, key=lambda fid: (-scores[fid], fid))[:n_results]
+        return [candidates[fid] for fid in best]
 
     def rebuild_chroma_index(self) -> int:
         """Rebuild ChromaDB from memory.json. Returns count of indexed facts."""
@@ -280,55 +446,67 @@ class MemoryManager:
         summary: str,
         extracted_facts: list[dict],
         model_used: str = "unknown",
-        clear_through_timestamp: str | None = None,
+        last_snapshot_message_id: str | None = None,
     ) -> dict:
-        """
-        Write session summary and upsert consolidated facts.
-        Called from main.py after LLM generates summary + fact extraction.
-        """
-        # Update session record
-        for sess in self._schema.sessions:
-            if sess.id == session_id:
-                sess.ended_at = datetime.now(timezone.utc).isoformat()
-                sess.summary = summary
-                sess.message_count = len(self._schema.short_term.messages)
-                if model_used not in sess.models_used:
-                    sess.models_used.append(model_used)
-                break
+        """Commit derived facts while retaining all original messages."""
+        if not self.session_exists(session_id):
+            raise ValueError(f"Unknown session: {session_id}")
+        messages = self._schema.session_messages[session_id]
+        cursor = self._schema.session_consolidation_cursor.get(session_id, 0)
+        if not last_snapshot_message_id:
+            raise ValueError("Consolidation requires a stable message snapshot ID")
+        idx = next((i for i, msg in enumerate(messages) if msg.id == last_snapshot_message_id), None)
+        if idx is None:
+            raise ValueError("Unknown snapshot message ID")
+        if idx < cursor:
+            return {"added": 0, "skipped_duplicates": 0, "session_id": session_id,
+                    "already_consolidated": True}
 
-        added = 0
-        skipped = 0
+        # Validate the entire model response before any facts are committed.
+        if not isinstance(extracted_facts, list) or not isinstance(summary, str):
+            raise ValueError("Invalid consolidation response")
+        for raw in extracted_facts:
+            if not isinstance(raw, dict) or not isinstance(raw.get("content"), str):
+                raise ValueError("Invalid fact in consolidation response")
+            FactEntry(
+                content=raw["content"], category=raw.get("category", "other"),
+                confidence=raw.get("confidence", 0.6),
+            )
+
+        added = skipped = 0
         trust_score = self._get_model_trust(model_used)
-
         for raw in extracted_facts:
             result = self.add_fact(
-                content=raw.get("content", ""),
+                content=raw["content"],
                 category=raw.get("category", "other"),
                 confidence=raw.get("confidence", 0.6),
-                source_type="consolidated",
+                source_type="explicit" if raw.get("evidence_message_ids") else "inference",
                 tags=raw.get("tags", []),
                 model_origin=model_used,
                 model_trust_score=trust_score,
+                session_id=session_id,
+                assertion_kind=raw.get("assertion_kind", "unknown"),
+                evidence_message_ids=raw.get("evidence_message_ids", []),
+                evidence_quote=raw.get("evidence_quote"),
             )
             if result:
                 added += 1
             else:
                 skipped += 1
 
-        # Manual consolidation clears the active context. Mid-session
-        # consolidation removes only the messages included in its snapshot,
-        # preserving messages received while the LLM was processing.
-        if clear_through_timestamp is None:
-            self._schema.short_term.messages = []
-        else:
-            self._schema.short_term.messages = [
-                message
-                for message in self._schema.short_term.messages
-                if message.timestamp > clear_through_timestamp
-            ]
-        self._save_schema()
+        for sess in self._schema.sessions:
+            if sess.id == session_id:
+                sess.summary = summary
+                sess.message_count = idx + 1
+                if model_used not in sess.models_used:
+                    sess.models_used.append(model_used)
+                # Only mark ended when the snapshot includes the last message.
+                if idx + 1 == len(messages):
+                    sess.ended_at = datetime.now(timezone.utc).isoformat()
+                break
 
-        logger.info("Consolidation done: added=%d skipped=%d(dup)", added, skipped)
+        self._schema.session_consolidation_cursor[session_id] = idx + 1
+        self._save_schema()
         return {"added": added, "skipped_duplicates": skipped, "session_id": session_id}
 
     # ------------------------------------------------------------------
@@ -367,27 +545,31 @@ class MemoryManager:
     # Private helpers
     # ------------------------------------------------------------------
 
+    def _conflict_candidates(self, content: str) -> list[str]:
+        """Non-destructive numerical discrepancy detector; candidates need review."""
+        nums = set(re.findall(r"\d+(?:\.\d+)?", content))
+        if not nums:
+            return []
+        tokens = self._lexical_terms(re.sub(r"\d+(?:\.\d+)?", "", content))
+        matched = []
+        for fact in self._schema.facts:
+            if fact.status != "active":
+                continue
+            other_nums = set(re.findall(r"\d+(?:\.\d+)?", fact.content))
+            if not other_nums or other_nums == nums:
+                continue
+            shared = tokens & self._lexical_terms(re.sub(r"\d+(?:\.\d+)?", "", fact.content))
+            if shared:
+                matched.append(fact.id)
+        return matched[:10]
+
     def _is_duplicate(self, content: str, threshold: float = DEDUP_THRESHOLD) -> bool:
-        """
-        v1.4 deduplication: embed the new content, query ChromaDB,
-        if closest distance < threshold → duplicate.
-        """
-        try:
-            col = self._chroma.get_collection(CHROMA_FACTS_COLLECTION)
-            if col.count() == 0:
-                return False
-            emb = self._embed([content])[0]
-            results = col.query(
-                query_embeddings=[emb],
-                n_results=1,
-                include=["distances"],
-            )
-            if results["distances"] and results["distances"][0]:
-                closest_dist = results["distances"][0][0]
-                return closest_dist < threshold
-        except Exception as e:
-            logger.warning("Dedup check error: %s", e)
-        return False
+        """Only discard exact normalized duplicates, never corrections."""
+        canonical = " ".join(content.casefold().split())
+        return any(
+            f.status == "active" and " ".join(f.content.casefold().split()) == canonical
+            for f in self._schema.facts
+        )
 
     def _index_fact(self, fact: FactEntry) -> None:
         try:

@@ -1,9 +1,9 @@
 "use client";
 import { useCallback, useEffect, useState } from "react";
-import { fetchFacts, deleteFact, rebuildMemory, Fact } from "@/lib/api";
+import { fetchFacts, deleteFact, replaceFact, rebuildMemory, Fact } from "@/lib/api";
 import { useApp } from "@/lib/AppContext";
 
-const SOURCE_TYPES = ["", "consolidation", "ingest", "manual"];
+const SOURCE_TYPES = ["", "explicit", "inference", "thinking", "consolidated", "unknown"];
 
 export default function MemoryPage() {
   const { toast, refreshHealth } = useApp();
@@ -38,6 +38,16 @@ export default function MemoryPage() {
       toast("削除に失敗しました", "error");
     } finally {
       setDeletingId(null);
+    }
+  };
+
+  const handleCorrect = async (id: string, content: string) => {
+    try {
+      await replaceFact(id, content);
+      await load();
+      toast("訂正履歴を保存しました", "success");
+    } catch {
+      toast("記憶の訂正に失敗しました", "error");
     }
   };
 
@@ -106,6 +116,7 @@ export default function MemoryPage() {
               key={fact.id}
               fact={fact}
               onDelete={handleDelete}
+              onCorrect={handleCorrect}
               deleting={deletingId === fact.id}
             />
           ))}
@@ -115,17 +126,30 @@ export default function MemoryPage() {
   );
 }
 
-function FactCard({ fact, onDelete, deleting }: {
+function FactCard({ fact, onDelete, onCorrect, deleting }: {
   fact: Fact;
   onDelete: (id: string) => void;
+  onCorrect: (id: string, content: string) => Promise<void>;
   deleting: boolean;
 }) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(fact.content);
+  const [saving, setSaving] = useState(false);
   const conf = Math.round(fact.confidence * 100);
   const confColor = conf >= 80 ? "var(--accent-green)" : conf >= 50 ? "var(--accent-amber)" : "var(--accent-red)";
 
   return (
     <div className={`fact-card glass-card ${fact.bias_flag ? "flagged" : ""}`}>
-      <div className="fact-content">{fact.content}</div>
+      {editing ? (
+        <div className="flex gap-2 items-center">
+          <input className="input" aria-label="記憶の訂正" value={draft} onChange={e => setDraft(e.target.value)} />
+          <button className="btn btn-primary btn-sm" disabled={!draft.trim() || saving}
+            onClick={async () => { setSaving(true); try { await onCorrect(fact.id, draft); setEditing(false); } finally { setSaving(false); } }}>
+            保存
+          </button>
+          <button className="btn btn-secondary btn-sm" onClick={() => { setEditing(false); setDraft(fact.content); }}>取消</button>
+        </div>
+      ) : <div className="fact-content">{fact.content}</div>}
       <div className="fact-footer">
         <span className="badge badge-blue">{fact.source_type}</span>
         <span className="badge badge-muted text-mono">{fact.model_origin}</span>
@@ -143,6 +167,9 @@ function FactCard({ fact, onDelete, deleting }: {
           </div>
           <span className="text-xs" style={{ color: confColor, minWidth: 32 }}>{conf}%</span>
         </div>
+        <button className="btn btn-secondary btn-sm" onClick={() => setEditing(true)} disabled={editing} title="訂正">
+          訂正
+        </button>
         <button
           id={`btn-delete-fact-${fact.id}`}
           className="btn btn-danger btn-sm btn-icon"
