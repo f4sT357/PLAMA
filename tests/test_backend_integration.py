@@ -23,7 +23,8 @@ def backend(mm, monkeypatch):
     async def fake_llm(url, model, messages, max_tokens=1500):
         prompt = messages[0]["content"]
         # The source message ID is present in a fixed user turn.
-        mid = next(msg.id for msgs in mm.get_schema().session_messages.values() for msg in msgs\n                   if "I prefer local model portability" in msg.content)
+        mid = next(msg.id for msgs in mm.get_schema().session_messages.values() for msg in msgs
+                   if "I prefer local model portability" in msg.content)
         return json.dumps({
             "summary": "User configuration",
             "facts": [{
