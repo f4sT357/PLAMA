@@ -163,6 +163,10 @@ class ChatRequest(BaseModel):
     override_model: Optional[str] = None   # force a specific model (debug)
 
 
+class ReplaceFactRequest(BaseModel):
+    content: str = Field(min_length=1)
+
+
 class NewSessionResponse(BaseModel):
     session_id: str
     created_at: str
