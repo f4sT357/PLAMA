@@ -19,8 +19,8 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       - run: python -m pip install --upgrade pip
-      - run: python -m pip install "pydantic>=2,<3" pytest
-      - run: python -m compileall -q main.py memory_manager.py models.py model_router.py prompt_builder.py bias_checker.py config_manager.py trust_registry.py pipeline_ingest.py
+      - run: python -m pip install "pydantic>=2,<3" pytest fastapi httpx
+      - run: python -m compileall -q benchmarks/evaluate_retrieval.py main.py memory_manager.py models.py model_router.py prompt_builder.py bias_checker.py config_manager.py trust_registry.py pipeline_ingest.py
       - run: python -m pytest -q tests
   frontend:
     runs-on: ubuntu-latest
