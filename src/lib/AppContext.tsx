@@ -158,9 +158,10 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
 
   // 初回起動時の初期化
   useEffect(() => {
-    if (initStarted.current) return;
-    initStarted.current = true;
-    const init = async () => {
+    // Dev StrictMode replays effect setup; allow polling to reattach on replay.
+    if (!initStarted.current) {
+      initStarted.current = true;
+      const init = async () => {
       await refreshHealth();
       try {
         // sessionStorage isolates ordinary tabs and survives reloads.
@@ -182,7 +183,8 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     // Initial data load (Only once)
     loadModels();
     loadConfig();
-    loadTrust();
+      loadTrust();
+    }
 
     const timer = setInterval(refreshHealth, 15_000);
     return () => clearInterval(timer);
