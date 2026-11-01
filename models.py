@@ -42,6 +42,13 @@ class FactEntry(BaseModel):
     model_trust_score: float = Field(default=0.0, ge=0.0, le=1.0)
     bias_flag: bool = False
     bias_score: float = Field(default=0.0, ge=0.0, le=1.0)
+    # Additive fields: old memory.json files load with these defaults.
+    status: Literal["active", "superseded", "disputed"] = "active"
+    assertion_kind: Literal["explicit", "inference", "plan", "hypothesis", "unknown"] = "unknown"
+    evidence_message_ids: list[str] = Field(default_factory=list)
+    supersedes: list[str] = Field(default_factory=list)
+    valid_from: Optional[str] = None
+    valid_to: Optional[str] = None
 
     @field_validator("confidence")
     @classmethod
