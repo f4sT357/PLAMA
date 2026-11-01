@@ -222,6 +222,27 @@ async def health():
 
 # --- Session ---
 
+@app.get("/api/sessions", tags=["core"])
+async def list_sessions():
+    return {"sessions": [
+        {"id": sess.id, "started_at": sess.started_at,
+         "message_count": len(memory_manager.get_recent_messages(sess.id, n=1000000)),
+         "pending_count": len(memory_manager.get_pending_messages(sess.id))}
+        for sess in reversed(memory_manager.get_schema().sessions[-50:])
+        if memory_manager.session_exists(sess.id)
+    ]}
+
+
+@app.get("/api/session/{session_id}/messages", tags=["core"])
+async def list_session_messages(session_id: str, limit: int = 150):
+    if not memory_manager.session_exists(session_id):
+        raise HTTPException(404, f"Unknown session: {session_id}")
+    bounded = max(1, min(limit, 500))
+    return {"messages": [
+        m.model_dump() for m in memory_manager.get_recent_messages(session_id, n=bounded)
+    ]}
+
+
 @app.get("/api/session/{session_id}", tags=["core"])
 async def check_session(session_id: str):
     if not memory_manager.session_exists(session_id):
