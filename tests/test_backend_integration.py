@@ -79,3 +79,22 @@ def test_api_consolidates_only_current_session(backend, mm):
             assert len(mm.get_pending_messages(sid)) == 0
             assert len(mm.get_pending_messages(other)) == 1
     asyncio.run(run())
+
+def test_session_listing_and_message_restore(backend, mm):
+    import httpx
+
+    async def run():
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=backend.app), base_url="http://test"
+        ) as client:
+            first = (await client.post("/api/session/new")).json()["session_id"]
+            mm.add_message(first, "user", "Restore this history after reload")
+            second = (await client.post("/api/session/new")).json()["session_id"]
+            sessions = (await client.get("/api/sessions")).json()["sessions"]
+            assert sessions[0]["id"] == second
+            assert any(x["id"] == first and x["message_count"] == 1 for x in sessions)
+            restored = (await client.get(f"/api/session/{first}/messages")).json()["messages"]
+            assert restored[0]["content"] == "Restore this history after reload"
+            assert (await client.get("/api/session/not-found/messages")).status_code == 404
+
+    asyncio.run(run())
