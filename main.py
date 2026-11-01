@@ -220,6 +220,13 @@ async def health():
 
 # --- Session ---
 
+@app.get("/api/session/{session_id}", tags=["core"])
+async def check_session(session_id: str):
+    if not memory_manager.session_exists(session_id):
+        raise HTTPException(404, f"Unknown session: {session_id}")
+    return {"session_id": session_id, "exists": True}
+
+
 @app.post("/api/session/new", response_model=NewSessionResponse, tags=["core"])
 async def new_session():
     session_id = memory_manager.new_session()
