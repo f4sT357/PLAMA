@@ -90,6 +90,7 @@ export interface PlamaConfig {
   main_model: string;
   sub_model: string;
   bias_model: string;
+  consolidation_model: string;
   last_updated: string;
 }
 
@@ -97,6 +98,7 @@ export interface UpdateConfigRequest {
   main_model?: string;
   sub_model?: string;
   bias_model?: string;
+  consolidation_model?: string;
 }
 
 export interface CorpusStats {
@@ -111,6 +113,11 @@ export async function fetchHealth(): Promise<HealthResponse> {
   const r = await fetch(`${API_BASE}/api/health`);
   if (!r.ok) throw new Error("Health check failed");
   return r.json();
+}
+
+export async function sessionExists(sessionId: string): Promise<boolean> {
+  const r = await fetch(`${API_BASE}/api/session/${encodeURIComponent(sessionId)}`);
+  return r.ok;
 }
 
 export async function newSession(): Promise<NewSessionResponse> {
