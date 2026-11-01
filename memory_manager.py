@@ -14,6 +14,7 @@ import logging
 import re
 import os
 import shutil
+import sqlite3
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -44,6 +45,7 @@ MEMORY_DIR = Path(os.getenv("PLAMA_MEMORY_DIR", "./memory_data"))
 MEMORY_JSON = MEMORY_DIR / "memory.json"
 CHROMA_DIR = MEMORY_DIR / "chroma_store"
 CORPUS_DIR = MEMORY_DIR / "corpus_store"
+SQLITE_DB = MEMORY_DIR / "memory.sqlite3"
 
 EMBEDDING_MODEL = os.getenv("PLAMA_EMBEDDING_MODEL", "paraphrase-multilingual-MiniLM-L12-v2")
 
@@ -66,6 +68,8 @@ class MemoryManager:
         self._schema: MemorySchema | None = None
         self._chroma: chromadb.ClientAPI | None = None
         self._embed_model: SentenceTransformer | None = None
+        self._db: sqlite3.Connection | None = None
+        self._needs_migration_save = False
 
     # ------------------------------------------------------------------
     # Initialisation
@@ -78,6 +82,8 @@ class MemoryManager:
         CORPUS_DIR.mkdir(parents=True, exist_ok=True)
 
         self._load_schema()
+        self._init_sqlite()
+        self._load_persistent_messages()
         self._init_chroma()
         self._load_embedding_model()
         logger.info("MemoryManager initialised. facts=%d sessions=%d",
@@ -104,12 +110,54 @@ class MemoryManager:
                 self._schema.short_term = ShortTermMemory(
                     current_session_id=legacy.current_session_id
                 )
-                self._save_schema()
+                # Delay saving until all legacy messages are inserted in SQLite.
+                self._needs_migration_save = True
             logger.info("Loaded existing memory.json (schema %s)", self._schema.meta.schema_version)
             return
 
+        # A missing JSON file must not silently discard a populated SQLite store.
+        if SQLITE_DB.exists() and SQLITE_DB.stat().st_size > 0:
+            raise RuntimeError(
+                "memory.json is missing while memory.sqlite3 exists; restore JSON metadata from backup"
+            )
         self._schema = MemorySchema()
         self._save_schema()
+
+    def _init_sqlite(self) -> None:
+        self._db = sqlite3.connect(str(SQLITE_DB), timeout=30)
+        self._db.execute("PRAGMA journal_mode=WAL")
+        self._db.execute("PRAGMA busy_timeout=30000")
+        self._db.execute("""
+            CREATE TABLE IF NOT EXISTS messages (
+                seq INTEGER PRIMARY KEY AUTOINCREMENT,
+                id TEXT NOT NULL UNIQUE,
+                session_id TEXT NOT NULL,
+                message_json TEXT NOT NULL
+            )
+        """)
+        self._db.execute("CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, seq)")
+        self._db.commit()
+
+    def _load_persistent_messages(self) -> None:
+        # Copy older JSON messages once; INSERT OR IGNORE prevents duplicate imports.
+        with self._db:
+            for sid, messages in self._schema.session_messages.items():
+                for msg in messages:
+                    self._db.execute(
+                        "INSERT OR IGNORE INTO messages(id,session_id,message_json) VALUES(?,?,?)",
+                        (msg.id, sid, msg.model_dump_json()),
+                    )
+        recovered: dict[str, list[MessageEntry]] = {
+            sess.id: [] for sess in self._schema.sessions
+        }
+        for sid, json_text in self._db.execute(
+            "SELECT session_id, message_json FROM messages ORDER BY seq"
+        ):
+            recovered.setdefault(sid, []).append(MessageEntry.model_validate_json(json_text))
+        self._schema.session_messages = recovered
+        if self._needs_migration_save:
+            self._save_schema()
+            self._needs_migration_save = False
 
     def _init_chroma(self) -> None:
         self._chroma = chromadb.PersistentClient(
@@ -131,7 +179,8 @@ class MemoryManager:
 
     def _save_schema(self) -> None:
         self._schema.bump_updated()
-        payload = self._schema.model_dump_json(by_alias=True, indent=2)
+        # Raw messages live transactionally in SQLite; JSON stores metadata and derived facts.
+        payload = self._schema.model_dump_json(by_alias=True, indent=2, exclude={"session_messages"})
         # Validate before touching durable state.
         json.loads(payload)
         tmp = MEMORY_JSON.with_suffix(".tmp")
@@ -173,8 +222,15 @@ class MemoryManager:
         if not self.session_exists(session_id):
             raise ValueError(f"Unknown session: {session_id}")
         msg = MessageEntry(role=role, content=content, model_used=model_used)  # type: ignore[arg-type]
+        # Commit the original message first; even if the JSON metadata save fails,
+        # messages can be reconstructed from the SQLite event log.
+        with self._db:
+            self._db.execute(
+                "INSERT INTO messages(id,session_id,message_json) VALUES(?,?,?)",
+                (msg.id, session_id, msg.model_dump_json()),
+            )
         self._schema.session_messages[session_id].append(msg)
-        # Raw messages are intentionally not pruned. Consolidation is a derived view.
+        # Raw messages are intentionally never pruned.
         self._save_schema()
 
     def get_recent_messages(self, session_id: str, n: int = 10) -> list[MessageEntry]:
